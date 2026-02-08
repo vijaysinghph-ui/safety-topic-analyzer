@@ -15,7 +15,7 @@ if uploaded_file:
 
     if st.button("Analyze Safety Topics"):
 
-        client = OpenAI(api_key="PASTE_YOUR_API_KEY_HERE")
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
         prompt = f"""
         You are a pharmacovigilance expert.
