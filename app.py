@@ -5,10 +5,15 @@ from openai import OpenAI
 
 st.title("Safety Topic Analyzer")
 
-# ---------- OpenAI Client ----------
-api_key = os.getenv("OPENAI_API_KEY")
+# ---------- OpenAI Client (Cloud + Local) ----------
+api_key = None
+if "OPENAI_API_KEY" in st.secrets:
+    api_key = st.secrets["OPENAI_API_KEY"]
+else:
+    api_key = os.getenv("OPENAI_API_KEY")
+
 if not api_key:
-    st.error("OpenAI API key not found. Please set OPENAI_API_KEY in Streamlit Secrets.")
+    st.error("OpenAI API key not found. Add OPENAI_API_KEY in Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
 client = OpenAI(api_key=api_key)
