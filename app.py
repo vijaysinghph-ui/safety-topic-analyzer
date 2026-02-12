@@ -3,9 +3,10 @@ import streamlit as st
 import pandas as pd
 from openai import OpenAI
 
+st.set_page_config(page_title="Safety Topic Analyzer")
 st.title("Safety Topic Analyzer")
 
-# ---------- OpenAI Client (Cloud + Local) ----------
+# ---------- OpenAI Client ----------
 api_key = None
 if "OPENAI_API_KEY" in st.secrets:
     api_key = st.secrets["OPENAI_API_KEY"]
@@ -17,114 +18,194 @@ if not api_key:
     st.stop()
 
 client = OpenAI(api_key=api_key)
-st.write("OpenAI key detected")
-if st.button("Test OpenAI"):
-    r = client.chat.completions.create(
-        model="gpt-5",
-        messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-    )
-    st.write(r.choices[0].message.content)
 
-
-# ---------- Helper: find likely column names ----------
+# ---------- Helper Functions ----------
 def find_col(df, candidates):
     cols = list(df.columns)
     cols_l = [str(c).lower().strip() for c in cols]
 
     for cand in candidates:
         cand_l = cand.lower()
-
-        # exact match
         for i, c in enumerate(cols_l):
             if c == cand_l:
                 return cols[i]
-
-        # contains match
         for i, c in enumerate(cols_l):
             if cand_l in c:
                 return cols[i]
-
     return None
 
 
+def yes_count(series):
+    s = series.astype(str).str.strip().str.lower()
+    return int(s.isin(["y", "yes", "true", "1"]).sum())
+
+
+def top_values(series, n=5):
+    return series.dropna().astype(str).value_counts().head(n).to_dict()
+
+
 # ---------- Upload ----------
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel line listing", type=["xlsx"])
 
 if uploaded_file is not None:
-    # READ THE EXCEL (this is what you were missing)
     df = pd.read_excel(uploaded_file)
 
     st.subheader("Preview of uploaded data")
     st.dataframe(df.head(20))
 
-    # ---------- Auto-detect Event PT ----------
-    PT_CANDIDATES = [
-        "event pt", "preferred term", "meddra pt", "reaction pt", "event_preferred_term", "pt"
-    ]
-    CASE_CANDIDATES = ["case number", "case id", "icsr", "report id", "safety report id"]
+    # ---- Column Candidates ----
+    PT_CANDIDATES = ["event pt", "preferred term", "meddra pt", "reaction pt", "pt"]
+    CASE_CANDIDATES = ["case number", "case id", "icsr", "report id"]
 
+    SERIOUS_CANDS = ["serious case flag", "serious", "event seriousness"]
+    FATAL_CANDS = ["death flag", "fatal case flag", "fatal"]
+    LISTED_CANDS = ["listedness", "event listedness", "expected"]
+    DECH_CANDS = ["dechallenge", "dechallenge results"]
+    RECH_CANDS = ["rechallenge", "rechallenge results"]
+    ONSET_CANDS = ["onset latency", "time to onset", "event start date"]
+    COUNTRY_CANDS = ["country"]
+    NARR_CANDS = ["narrative"]
+
+    # ---- Detect Columns ----
     pt_col = find_col(df, PT_CANDIDATES)
     case_col = find_col(df, CASE_CANDIDATES)
 
-    st.write("Detected columns:")
-    st.write({"Event PT column": pt_col, "Case column (optional)": case_col})
+    ser_col = find_col(df, SERIOUS_CANDS)
+    fat_col = find_col(df, FATAL_CANDS)
+    list_col = find_col(df, LISTED_CANDS)
+    dech_col = find_col(df, DECH_CANDS)
+    rech_col = find_col(df, RECH_CANDS)
+    onset_col = find_col(df, ONSET_CANDS)
+    country_col = find_col(df, COUNTRY_CANDS)
+    narr_col = find_col(df, NARR_CANDS)
+
+    st.write("Detected Columns:")
+    st.write({
+        "Event PT": pt_col,
+        "Case ID": case_col,
+        "Serious": ser_col,
+        "Fatal": fat_col,
+        "Listedness": list_col,
+        "Dechallenge": dech_col,
+        "Rechallenge": rech_col,
+        "Onset": onset_col,
+        "Country": country_col,
+        "Narrative": narr_col,
+    })
 
     if not pt_col:
-        st.error("Could not detect Event PT column. Please rename your PT column to include 'Event PT' or 'Preferred Term'.")
+        st.error("Event PT column not detected. Please rename to include 'Event PT' or 'Preferred Term'.")
         st.stop()
 
-    # ---------- Group by Event PT ----------
+    # ---- Group by PT ----
     grouped = df.groupby(pt_col, dropna=True)
-    topic_table = grouped.size().reset_index(name="rows")
-    topic_table = topic_table.sort_values("rows", ascending=False)
+    topic_table = grouped.size().reset_index(name="case_count")
+    topic_table = topic_table.sort_values("case_count", ascending=False)
 
     st.subheader("Auto-grouped topics (by Event PT)")
     st.dataframe(topic_table.head(50))
-    # ---------- Analyze Safety Topics ----------
-    if st.button("Analyze Safety Topics"):
 
-        st.info("Analyzing top Event PTs using Bradford Hill framework...")
+    # ---------- Mode Selection ----------
+    st.subheader("Choose Analysis Mode")
 
-        TOP_N = 5
-        top_pts = topic_table.head(TOP_N)[pt_col].tolist()
+    mode = st.radio(
+        "Select Mode",
+        ["Single PT Deep Dive (PBRER / Signal Assessment)",
+         "Bulk Trending (Monthly Scan)"]
+    )
 
-        for pt in top_pts:
+    def build_evidence(subset, pt_value):
+        return {
+            "event_pt": str(pt_value),
+            "total_cases": int(len(subset)),
+            "serious_yes": yes_count(subset[ser_col]) if ser_col else None,
+            "fatal_yes": yes_count(subset[fat_col]) if fat_col else None,
+            "listedness": top_values(subset[list_col]) if list_col else None,
+            "dechallenge": top_values(subset[dech_col]) if dech_col else None,
+            "rechallenge": top_values(subset[rech_col]) if rech_col else None,
+            "onset_examples": subset[onset_col].dropna().astype(str).head(5).tolist() if onset_col else [],
+            "countries": top_values(subset[country_col]) if country_col else None,
+            "narratives": subset[narr_col].dropna().astype(str).head(2).tolist() if narr_col else [],
+        }
 
-            subset = df[df[pt_col] == pt]
-            count_cases = len(subset)
+    # ==========================
+    # MODE A: Single PT
+    # ==========================
+    if mode.startswith("Single"):
 
-            summary_text = f"""
-Event PT: {pt}
-Total Cases: {count_cases}
+        pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
 
-Sample rows:
-{subset.head(3).to_string()}
+        if st.button("Analyze Selected PT"):
+            subset = df[df[pt_col] == pt_choice]
+            evidence = build_evidence(subset, pt_choice)
+
+            prompt = f"""
+You are a senior pharmacovigilance physician preparing a PBRER safety topic evaluation.
+
+Provide:
+1) Event PT
+2) Safety topic decision: Include / Monitor / Not a priority
+3) Case synopsis (max 6 bullets)
+4) Bradford Hill assessment (brief but medical):
+   - Strength
+   - Consistency
+   - Temporality
+   - Biological gradient
+   - Plausibility
+   - Coherence
+   - Experiment
+   - Analogy
+5) Causality conclusion
+6) PBRER-ready summary (150 words max)
+7) Recommended next action
+
+Evidence:
+{evidence}
 """
 
             response = client.chat.completions.create(
                 model="gpt-5",
-                messages=[
-                    {"role": "system", "content": "You are a senior pharmacovigilance physician applying Bradford Hill criteria."},
-                    {"role": "user", "content": f"""
-Evaluate this safety topic.
-
-Provide:
-1) Safety topic decision
-2) Strength
-3) Temporality
-4) Plausibility
-5) Experiment (dechallenge/rechallenge)
-6) Conclusion
-7) Concise PBRER-ready summary (150 words max)
-
-Data:
-{summary_text}
-"""}
-                ]
+                messages=[{"role": "user", "content": prompt}],
             )
 
-            st.subheader(f"Bradford Hill Evaluation – {pt}")
+            st.subheader(f"Deep Dive – {pt_choice}")
             st.write(response.choices[0].message.content)
-            st.markdown("---")
 
-   
+    # ==========================
+    # MODE B: Bulk Trending
+    # ==========================
+    else:
+
+        TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
+
+        if st.button("Analyze Top PTs"):
+            top_pts = topic_table.head(TOP_N)[pt_col].tolist()
+
+            for pt in top_pts:
+                subset = df[df[pt_col] == pt]
+                evidence = build_evidence(subset, pt)
+
+                prompt = f"""
+You are a senior pharmacovigilance physician performing monthly safety trending.
+
+Provide SHORT output:
+1) Event PT
+2) Safety topic decision
+3) Key evidence (max 4 bullets)
+4) Bradford Hill headline
+5) Causality conclusion
+6) One-paragraph summary (100 words max)
+7) Recommended action
+
+Evidence:
+{evidence}
+"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=[{"role": "user", "content": prompt}],
+                )
+
+                st.subheader(f"Trending – {pt}")
+                st.write(response.choices[0].message.content)
+                st.markdown("---")
