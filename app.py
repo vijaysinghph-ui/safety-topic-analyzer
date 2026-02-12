@@ -5,6 +5,15 @@ from openai import OpenAI
 
 st.title("Safety Topic Analyzer")
 
+# ---------- OpenAI Client ----------
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    st.error("OpenAI API key not found. Please set OPENAI_API_KEY in Streamlit Secrets.")
+    st.stop()
+
+client = OpenAI(api_key=api_key)
+
+
 # ---------- Helper: find likely column names ----------
 def find_col(df, candidates):
     cols = list(df.columns)
@@ -59,12 +68,51 @@ if uploaded_file is not None:
 
     st.subheader("Auto-grouped topics (by Event PT)")
     st.dataframe(topic_table.head(50))
+    # ---------- Analyze Safety Topics ----------
+    if st.button("Analyze Safety Topics"):
 
-    # ---------- Optional: test OpenAI connectivity later ----------
-    if st.button("Test OpenAI Connection"):
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        resp = client.chat.completions.create(
-            model="gpt-5",
-            messages=[{"role": "user", "content": "Reply with: OK"}],
-        )
-        st.write(resp.choices[0].message.content)
+        st.info("Analyzing top Event PTs using Bradford Hill framework...")
+
+        TOP_N = 5
+        top_pts = topic_table.head(TOP_N)[pt_col].tolist()
+
+        for pt in top_pts:
+
+            subset = df[df[pt_col] == pt]
+            count_cases = len(subset)
+
+            summary_text = f"""
+Event PT: {pt}
+Total Cases: {count_cases}
+
+Sample rows:
+{subset.head(3).to_string()}
+"""
+
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {"role": "system", "content": "You are a senior pharmacovigilance physician applying Bradford Hill criteria."},
+                    {"role": "user", "content": f"""
+Evaluate this safety topic.
+
+Provide:
+1) Safety topic decision
+2) Strength
+3) Temporality
+4) Plausibility
+5) Experiment (dechallenge/rechallenge)
+6) Conclusion
+7) Concise PBRER-ready summary (150 words max)
+
+Data:
+{summary_text}
+"""}
+                ]
+            )
+
+            st.subheader(f"Bradford Hill Evaluation – {pt}")
+            st.write(response.choices[0].message.content)
+            st.markdown("---")
+
+   
