@@ -18,6 +18,12 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 st.write("OpenAI key detected")
+if st.button("Test OpenAI"):
+    r = client.chat.completions.create(
+        model="gpt-5",
+        messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+    )
+    st.write(r.choices[0].message.content)
 
 
 # ---------- Helper: find likely column names ----------
