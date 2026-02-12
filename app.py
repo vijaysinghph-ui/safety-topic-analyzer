@@ -17,6 +17,7 @@ if not api_key:
     st.stop()
 
 client = OpenAI(api_key=api_key)
+st.write("OpenAI key detected")
 
 
 # ---------- Helper: find likely column names ----------
