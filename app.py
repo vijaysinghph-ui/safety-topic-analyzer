@@ -1,7 +1,9 @@
 import os
+import io
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
+from docx import Document
 
 # ----------------------------
 # Page Config
@@ -18,10 +20,8 @@ if "results" not in st.session_state:
 # ----------------------------
 # OpenAI Client
 # ----------------------------
-api_key = None
-if "OPENAI_API_KEY" in st.secrets:
-    api_key = st.secrets["OPENAI_API_KEY"]
-else:
+api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
+if not api_key:
     api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
@@ -36,7 +36,6 @@ client = OpenAI(api_key=api_key)
 def find_col(df, candidates):
     cols = list(df.columns)
     cols_l = [str(c).lower().strip() for c in cols]
-
     for cand in candidates:
         cand_l = cand.lower()
         for i, c in enumerate(cols_l):
@@ -47,15 +46,12 @@ def find_col(df, candidates):
                 return cols[i]
     return None
 
-
 def yes_count(series):
     s = series.astype(str).str.strip().str.lower()
     return int(s.isin(["y", "yes", "true", "1"]).sum())
 
-
 def top_values(series, n=5):
     return series.dropna().astype(str).value_counts().head(n).to_dict()
-
 
 # ----------------------------
 # Upload Excel
@@ -63,7 +59,6 @@ def top_values(series, n=5):
 uploaded_file = st.file_uploader("Upload Excel Line Listing", type=["xlsx"])
 
 if uploaded_file is not None:
-
     df = pd.read_excel(uploaded_file)
 
     st.subheader("Preview of Uploaded Data")
@@ -124,15 +119,11 @@ if uploaded_file is not None:
     st.subheader("Auto-grouped Topics (by Event PT)")
     st.dataframe(topic_table.head(50))
 
-    # ----------------------------
-    # Mode Selection
-    # ----------------------------
+    # Mode
     st.subheader("Select Analysis Mode")
-
     mode = st.radio(
         "Choose Mode",
-        ["Single PT Deep Dive (PBRER / Signal Assessment)",
-         "Bulk Trending (Monthly Scan)"]
+        ["Single PT Deep Dive (PBRER / Signal Assessment)", "Bulk Trending (Monthly Scan)"]
     )
 
     def build_evidence(subset, pt_value):
@@ -149,29 +140,28 @@ if uploaded_file is not None:
             "narrative_snippets": subset[narr_col].dropna().astype(str).head(2).tolist() if narr_col else [],
         }
 
-    # ==========================
-    # SINGLE PT MODE
-    # ==========================
+    # ----------------------------
+    # SINGLE PT MODE + WORD EXPORT
+    # ----------------------------
     if mode.startswith("Single"):
-
         pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
 
-        if st.button("Analyze Selected PT"):
-
+        if st.button("Analyze & Generate Word Report"):
             subset = df[df[pt_col] == pt_choice]
             evidence = build_evidence(subset, pt_choice)
 
             prompt = f"""
-You are a senior pharmacovigilance physician preparing a PBRER safety topic evaluation.
+You are a senior pharmacovigilance physician preparing a regulatory-grade PBRER safety topic evaluation.
+Write in formal regulatory tone.
 
-Provide:
-1) Event PT
-2) Safety topic decision
-3) Case synopsis (max 6 bullets)
-4) Bradford Hill assessment
-5) Causality conclusion
-6) PBRER-ready summary (150 words max)
-7) Recommended next action
+Provide clearly separated sections:
+Event PT
+Safety Topic Decision
+Case Synopsis
+Bradford Hill Assessment
+Causality Conclusion
+PBRER-Ready Summary
+Recommended Next Action
 
 Evidence:
 {evidence}
@@ -187,26 +177,50 @@ Evidence:
             st.subheader(f"Deep Dive – {pt_choice}")
             st.write(output_text)
 
-            # Save result
+            # Create Word document
+            document = Document()
+            document.add_heading("Safety Topic Evaluation Report", level=1)
+            document.add_paragraph(f"Event PT: {pt_choice}")
+            document.add_paragraph("")
+
+            document.add_heading("Evaluation", level=2)
+            document.add_paragraph(output_text)
+
+            document.add_page_break()
+            document.add_heading("Data Snapshot", level=2)
+            document.add_paragraph(f"Total Cases: {len(subset)}")
+            if ser_col:
+                document.add_paragraph(f"Serious Cases: {yes_count(subset[ser_col])}")
+            if fat_col:
+                document.add_paragraph(f"Fatal Cases: {yes_count(subset[fat_col])}")
+
+            doc_buffer = io.BytesIO()
+            document.save(doc_buffer)
+            doc_buffer.seek(0)
+
+            st.download_button(
+                label="Download Word Report",
+                data=doc_buffer,
+                file_name=f"Safety_Topic_{pt_choice}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
             st.session_state["results"].append({
                 "mode": "Single PT",
                 "event_pt": pt_choice,
                 "output": output_text
             })
 
-    # ==========================
+    # ----------------------------
     # BULK MODE
-    # ==========================
+    # ----------------------------
     else:
-
         TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
 
         if st.button("Analyze Top PTs"):
-
             top_pts = topic_table.head(TOP_N)[pt_col].tolist()
 
             for pt in top_pts:
-
                 subset = df[df[pt_col] == pt]
                 evidence = build_evidence(subset, pt)
 
@@ -216,7 +230,7 @@ You are a senior pharmacovigilance physician performing monthly safety trending.
 Provide SHORT output:
 1) Event PT
 2) Safety topic decision
-3) Key evidence
+3) Key evidence (max 4 bullets)
 4) Bradford Hill headline
 5) Causality conclusion
 6) One-paragraph summary (100 words max)
@@ -237,7 +251,6 @@ Evidence:
                 st.write(output_text)
                 st.markdown("---")
 
-                # Save result
                 st.session_state["results"].append({
                     "mode": "Bulk",
                     "event_pt": pt,
@@ -245,12 +258,10 @@ Evidence:
                 })
 
     # ----------------------------
-    # Download Section
+    # Saved Results + Download CSV
     # ----------------------------
     if st.session_state["results"]:
-
         st.subheader("Saved Results")
-
         results_df = pd.DataFrame(st.session_state["results"])
         st.dataframe(results_df)
 
@@ -258,10 +269,9 @@ Evidence:
             "Download Results (CSV)",
             data=results_df.to_csv(index=False).encode("utf-8"),
             file_name="safety_topic_results.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
         if st.button("Clear Saved Results"):
             st.session_state["results"] = []
             st.success("Results cleared.")
-
