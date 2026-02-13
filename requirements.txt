@@ -3,5 +3,7 @@ streamlit
 pandas
 openai
 openpyxl
+python-docx
+
 
 
