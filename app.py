@@ -184,7 +184,44 @@ Evidence:
             document.add_paragraph("")
 
             document.add_heading("Evaluation", level=2)
-            document.add_paragraph(output_text)
+
+
+            SECTION_TITLES = [
+                "Event PT",
+                "Safety Topic Decision",
+                "Case Synopsis",
+                "Bradford Hill Assessment",
+                "Causality Conclusion",
+                "PBRER-Ready Summary",
+                "Recommended Next Action",
+            ]
+
+            lines = [ln.rstrip() for ln in output_text.splitlines()]
+            current_title = None
+            buffer = []
+
+            def flush_section(title, buf):
+                if not title:
+                    return
+                document.add_heading(title, level=3)
+                text = "\n".join([b for b in buf if b.strip() != ""]).strip()
+                if text:
+                    for para in text.split("\n"):
+                        document.add_paragraph(para)
+
+            for ln in lines:
+                stripped = ln.strip()
+                if stripped in SECTION_TITLES:
+                    flush_section(current_title, buffer)
+                    current_title = stripped
+                    buffer = []
+                else:
+                    buffer.append(ln)
+
+            flush_section(current_title, buffer)
+
+
+
 
             document.add_page_break()
             document.add_heading("Data Snapshot", level=2)
