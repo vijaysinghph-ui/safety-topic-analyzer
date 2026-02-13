@@ -247,7 +247,7 @@ Evidence:
     # ----------------------------
     # Download Section
     # ----------------------------
-       if st.session_state["results"]:
+    if st.session_state["results"]:
 
         st.subheader("Saved Results")
 
