@@ -247,7 +247,7 @@ Evidence:
     # ----------------------------
     # Download Section
     # ----------------------------
-    if st.session_state["results"]:
+       if st.session_state["results"]:
 
         st.subheader("Saved Results")
 
@@ -257,4 +257,11 @@ Evidence:
         st.download_button(
             "Download Results (CSV)",
             data=results_df.to_csv(index=False).encode("utf-8"),
-            file
+            file_name="safety_topic_results.csv",
+            mime="text/csv"
+        )
+
+        if st.button("Clear Saved Results"):
+            st.session_state["results"] = []
+            st.success("Results cleared.")
+
