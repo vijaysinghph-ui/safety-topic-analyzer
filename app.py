@@ -154,14 +154,14 @@ if uploaded_file is not None:
 You are a senior pharmacovigilance physician preparing a regulatory-grade PBRER safety topic evaluation.
 Write in formal regulatory tone.
 
-Provide clearly separated sections:
-Event PT
+Provide clearly separated sections (DO NOT repeat Event PT title):
 Safety Topic Decision
 Case Synopsis
 Bradford Hill Assessment
 Causality Conclusion
 PBRER-Ready Summary
 Recommended Next Action
+
 
 Evidence:
 {evidence}
