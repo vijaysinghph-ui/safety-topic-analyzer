@@ -59,15 +59,14 @@ def top_values(series, n=5):
 uploaded_file = st.file_uploader("Upload Excel Line Listing", type=["xlsx"])
 
 if uploaded_file is not None:
+
     df = pd.read_excel(uploaded_file)
 
     st.subheader("Preview of Uploaded Data")
     st.dataframe(df.head(20))
 
-    # Column candidates
+    # Column detection
     PT_CANDIDATES = ["event pt", "preferred term", "meddra pt", "reaction pt", "pt"]
-    CASE_CANDIDATES = ["case number", "case id", "icsr", "report id"]
-
     SERIOUS_CANDS = ["serious case flag", "serious", "event seriousness"]
     FATAL_CANDS = ["death flag", "fatal case flag", "fatal"]
     LISTED_CANDS = ["listedness", "event listedness", "expected"]
@@ -77,10 +76,7 @@ if uploaded_file is not None:
     COUNTRY_CANDS = ["country"]
     NARR_CANDS = ["narrative"]
 
-    # Detect columns
     pt_col = find_col(df, PT_CANDIDATES)
-    case_col = find_col(df, CASE_CANDIDATES)
-
     ser_col = find_col(df, SERIOUS_CANDS)
     fat_col = find_col(df, FATAL_CANDS)
     list_col = find_col(df, LISTED_CANDS)
@@ -90,25 +86,10 @@ if uploaded_file is not None:
     country_col = find_col(df, COUNTRY_CANDS)
     narr_col = find_col(df, NARR_CANDS)
 
-    st.subheader("Detected Columns")
-    st.write({
-        "Event PT": pt_col,
-        "Case ID": case_col,
-        "Serious": ser_col,
-        "Fatal": fat_col,
-        "Listedness": list_col,
-        "Dechallenge": dech_col,
-        "Rechallenge": rech_col,
-        "Onset": onset_col,
-        "Country": country_col,
-        "Narrative": narr_col,
-    })
-
     if not pt_col:
-        st.error("Event PT column not detected. Rename column to include 'Event PT' or 'Preferred Term'.")
+        st.error("Event PT column not detected.")
         st.stop()
 
-    # Group by PT
     topic_table = (
         df.groupby(pt_col, dropna=True)
         .size()
@@ -119,11 +100,13 @@ if uploaded_file is not None:
     st.subheader("Auto-grouped Topics (by Event PT)")
     st.dataframe(topic_table.head(50))
 
-    # Mode
-    st.subheader("Select Analysis Mode")
+    # ----------------------------
+    # Mode Selection
+    # ----------------------------
     mode = st.radio(
         "Choose Mode",
-        ["Single PT Deep Dive (PBRER / Signal Assessment)", "Bulk Trending (Monthly Scan)"]
+        ["Single PT Deep Dive (PBRER / Signal Assessment)",
+         "Bulk Trending (Monthly Scan)"]
     )
 
     def build_evidence(subset, pt_value):
@@ -140,28 +123,46 @@ if uploaded_file is not None:
             "narrative_snippets": subset[narr_col].dropna().astype(str).head(2).tolist() if narr_col else [],
         }
 
-    # ----------------------------
-    # SINGLE PT MODE + WORD EXPORT
-    # ----------------------------
+    # ==================================================
+    # SINGLE PT MODE
+    # ==================================================
     if mode.startswith("Single"):
+
         pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
 
         if st.button("Analyze & Generate Word Report"):
+
             subset = df[df[pt_col] == pt_choice]
             evidence = build_evidence(subset, pt_choice)
 
             prompt = f"""
 You are a senior pharmacovigilance physician preparing a regulatory-grade PBRER safety topic evaluation.
-Write in formal regulatory tone.
 
-Provide clearly separated sections (DO NOT repeat Event PT title):
+Write in formal regulatory tone. Avoid speculative language.
+
+Provide clearly separated sections:
+
 Safety Topic Decision
+Background of Drug-Event Combination
 Case Synopsis
 Bradford Hill Assessment
+Regulatory Landscape Overview
 Causality Conclusion
 PBRER-Ready Summary
 Recommended Next Action
 
+Background of Drug-Event Combination:
+- Relevant pharmacology
+- Known class effects
+- Label recognition status
+- Mechanistic plausibility
+
+Regulatory Landscape Overview:
+- Known safety communications (FDA, EMA, MHRA)
+- Boxed warnings or contraindications (if generally known)
+- If uncertain, state: "No widely recognized regulatory action specific to this drug-event combination."
+
+Do NOT fabricate regulatory actions.
 
 Evidence:
 {evidence}
@@ -177,7 +178,7 @@ Evidence:
             st.subheader(f"Deep Dive – {pt_choice}")
             st.write(output_text)
 
-            # Create Word document
+            # ---------------- Word Export ----------------
             document = Document()
             document.add_heading("Safety Topic Evaluation Report", level=1)
             document.add_paragraph(f"Event PT: {pt_choice}")
@@ -185,12 +186,12 @@ Evidence:
 
             document.add_heading("Evaluation", level=2)
 
-
             SECTION_TITLES = [
-                "Event PT",
                 "Safety Topic Decision",
+                "Background of Drug-Event Combination",
                 "Case Synopsis",
                 "Bradford Hill Assessment",
+                "Regulatory Landscape Overview",
                 "Causality Conclusion",
                 "PBRER-Ready Summary",
                 "Recommended Next Action",
@@ -220,9 +221,6 @@ Evidence:
 
             flush_section(current_title, buffer)
 
-
-
-
             document.add_page_break()
             document.add_heading("Data Snapshot", level=2)
             document.add_paragraph(f"Total Cases: {len(subset)}")
@@ -242,36 +240,31 @@ Evidence:
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 
-            st.session_state["results"].append({
-                "mode": "Single PT",
-                "event_pt": pt_choice,
-                "output": output_text
-            })
-
-    # ----------------------------
+    # ==================================================
     # BULK MODE
-    # ----------------------------
+    # ==================================================
     else:
+
         TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
 
         if st.button("Analyze Top PTs"):
+
             top_pts = topic_table.head(TOP_N)[pt_col].tolist()
 
             for pt in top_pts:
+
                 subset = df[df[pt_col] == pt]
                 evidence = build_evidence(subset, pt)
 
                 prompt = f"""
 You are a senior pharmacovigilance physician performing monthly safety trending.
 
-Provide SHORT output:
+Provide:
 1) Event PT
 2) Safety topic decision
 3) Key evidence (max 4 bullets)
-4) Bradford Hill headline
-5) Causality conclusion
-6) One-paragraph summary (100 words max)
-7) Recommended action
+4) Causality conclusion
+5) Recommended action
 
 Evidence:
 {evidence}
@@ -287,28 +280,3 @@ Evidence:
                 st.subheader(f"Trending – {pt}")
                 st.write(output_text)
                 st.markdown("---")
-
-                st.session_state["results"].append({
-                    "mode": "Bulk",
-                    "event_pt": pt,
-                    "output": output_text
-                })
-
-    # ----------------------------
-    # Saved Results + Download CSV
-    # ----------------------------
-    if st.session_state["results"]:
-        st.subheader("Saved Results")
-        results_df = pd.DataFrame(st.session_state["results"])
-        st.dataframe(results_df)
-
-        st.download_button(
-            "Download Results (CSV)",
-            data=results_df.to_csv(index=False).encode("utf-8"),
-            file_name="safety_topic_results.csv",
-            mime="text/csv",
-        )
-
-        if st.button("Clear Saved Results"):
-            st.session_state["results"] = []
-            st.success("Results cleared.")
