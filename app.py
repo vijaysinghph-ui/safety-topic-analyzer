@@ -12,12 +12,6 @@ st.set_page_config(page_title="Safety Topic Analyzer", layout="wide")
 st.title("Safety Topic Analyzer")
 
 # ----------------------------
-# Session State Storage
-# ----------------------------
-if "results" not in st.session_state:
-    st.session_state["results"] = []
-
-# ----------------------------
 # OpenAI Client
 # ----------------------------
 api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
@@ -38,12 +32,17 @@ def find_col(df, candidates):
     cols_l = [str(c).lower().strip() for c in cols]
     for cand in candidates:
         cand_l = cand.lower()
+
+        # exact match
         for i, c in enumerate(cols_l):
             if c == cand_l:
                 return cols[i]
+
+        # contains match
         for i, c in enumerate(cols_l):
             if cand_l in c:
                 return cols[i]
+
     return None
 
 def yes_count(series):
@@ -65,7 +64,7 @@ if uploaded_file is not None:
     st.subheader("Preview of Uploaded Data")
     st.dataframe(df.head(20))
 
-    # Column detection
+    # Column candidates
     PT_CANDIDATES = ["event pt", "preferred term", "meddra pt", "reaction pt", "pt"]
     SERIOUS_CANDS = ["serious case flag", "serious", "event seriousness"]
     FATAL_CANDS = ["death flag", "fatal case flag", "fatal"]
@@ -76,6 +75,7 @@ if uploaded_file is not None:
     COUNTRY_CANDS = ["country"]
     NARR_CANDS = ["narrative"]
 
+    # Detect columns
     pt_col = find_col(df, PT_CANDIDATES)
     ser_col = find_col(df, SERIOUS_CANDS)
     fat_col = find_col(df, FATAL_CANDS)
@@ -87,9 +87,10 @@ if uploaded_file is not None:
     narr_col = find_col(df, NARR_CANDS)
 
     if not pt_col:
-        st.error("Event PT column not detected.")
+        st.error("Event PT column not detected. Rename column to include 'Event PT' or 'Preferred Term'.")
         st.stop()
 
+    # Group by PT
     topic_table = (
         df.groupby(pt_col, dropna=True)
         .size()
@@ -105,8 +106,10 @@ if uploaded_file is not None:
     # ----------------------------
     mode = st.radio(
         "Choose Mode",
-        ["Single PT Deep Dive (PBRER / Signal Assessment)",
-         "Bulk Trending (Monthly Scan)"]
+        [
+            "Single PT Deep Dive (PBRER / Signal Assessment)",
+            "Bulk Trending (Monthly Scan)"
+        ]
     )
 
     def build_evidence(subset, pt_value):
@@ -124,7 +127,7 @@ if uploaded_file is not None:
         }
 
     # ==================================================
-    # SINGLE PT MODE
+    # SINGLE PT MODE + WORD EXPORT
     # ==================================================
     if mode.startswith("Single"):
 
@@ -138,33 +141,76 @@ if uploaded_file is not None:
             prompt = f"""
 You are a senior pharmacovigilance physician preparing a regulatory-grade PBRER safety topic evaluation.
 
-Write in formal regulatory tone. Avoid speculative language.
+Write in formal regulatory tone suitable for inclusion in a PBRER or signal validation report.
+Be objective, evidence-based, and non-speculative.
+Clearly separate evidence from interpretation.
 
-Provide clearly separated sections:
+Provide the following clearly separated sections using EXACT section titles and in EXACT order:
 
-Safety Topic Decision
 Background of Drug-Event Combination
 Case Synopsis
 Bradford Hill Assessment
 Regulatory Landscape Overview
 Causality Conclusion
+Safety Topic Decision
 PBRER-Ready Summary
 Recommended Next Action
 
+--------------------------
+SECTION REQUIREMENTS
+--------------------------
+
 Background of Drug-Event Combination:
-- Relevant pharmacology
-- Known class effects
-- Label recognition status
-- Mechanistic plausibility
+- Brief pharmacological context relevant to the event.
+- Known class effects.
+- General labeling recognition (if broadly known).
+- Do NOT fabricate regulatory history.
+
+Case Synopsis:
+- Total cases, seriousness, fatality.
+- Key clinical patterns.
+- Confounders and alternative etiologies.
+- No interpretation.
+
+Bradford Hill Assessment:
+Evaluate concisely:
+- Strength
+- Consistency
+- Specificity
+- Temporality
+- Biological Gradient (if assessable)
+- Plausibility
+- Coherence
+- Experiment (dechallenge/rechallenge)
+- Analogy
 
 Regulatory Landscape Overview:
-- Known safety communications (FDA, EMA, MHRA)
-- Boxed warnings or contraindications (if generally known)
-- If uncertain, state: "No widely recognized regulatory action specific to this drug-event combination."
+- State whether widely recognized regulatory actions (FDA, EMA, MHRA) exist for this drug-event combination.
+- If none are broadly established, state:
+  "No widely recognized regulatory action specific to this drug-event combination."
+- Do NOT invent warnings or communications.
 
-Do NOT fabricate regulatory actions.
+Causality Conclusion:
+- Supported / Possible / Insufficient Evidence / Unlikely
+- Justify in 2–3 sentences.
 
-Evidence:
+Safety Topic Decision:
+- Include / Continue Monitoring / Close / Escalate for Signal Validation
+- Must logically follow from Causality Conclusion.
+
+PBRER-Ready Summary:
+- Continuous regulatory narrative paragraph (NO bullet points).
+- 140–180 words.
+- Integrate evidence + Hill reasoning + conclusion + decision.
+- Do NOT introduce new facts.
+- End with benefit–risk position statement.
+
+Recommended Next Action:
+- Clear PV action plan (routine monitoring, targeted follow-up, signal validation, labeling review, etc.).
+
+--------------------------
+EVIDENCE
+--------------------------
 {evidence}
 """
 
@@ -187,12 +233,12 @@ Evidence:
             document.add_heading("Evaluation", level=2)
 
             SECTION_TITLES = [
-                "Safety Topic Decision",
                 "Background of Drug-Event Combination",
                 "Case Synopsis",
                 "Bradford Hill Assessment",
                 "Regulatory Landscape Overview",
                 "Causality Conclusion",
+                "Safety Topic Decision",
                 "PBRER-Ready Summary",
                 "Recommended Next Action",
             ]
