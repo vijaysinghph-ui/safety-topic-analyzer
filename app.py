@@ -15,7 +15,12 @@ st.title("Safety Topic Analyzer")
 # ----------------------------
 # OpenAI Client
 # ----------------------------
-api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
+api_key = None
+try:
+    api_key = st.secrets.get("OPENAI_API_KEY")
+except Exception:
+    api_key = None
+
 if not api_key:
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -33,9 +38,11 @@ def find_col(df, candidates):
     cols_l = [str(c).lower().strip() for c in cols]
     for cand in candidates:
         cand_l = cand.lower()
+        # exact match
         for i, c in enumerate(cols_l):
             if c == cand_l:
                 return cols[i]
+        # contains match
         for i, c in enumerate(cols_l):
             if cand_l in c:
                 return cols[i]
@@ -52,11 +59,15 @@ def looks_like_bullets(text: str) -> bool:
     lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
     if not lines:
         return False
-    bulletish = sum(1 for ln in lines if ln.startswith(("-", "•", "*")) or ln[:2].isdigit() and ln[1] == ")")
+    bulletish = 0
+    for ln in lines:
+        if ln.startswith(("-", "•", "*")):
+            bulletish += 1
+        elif len(ln) >= 2 and ln[0].isdigit() and ln[1] in [")", ".", ":"]:
+            bulletish += 1
     return bulletish >= max(2, int(0.4 * len(lines)))
 
 def ensure_paragraph(text: str) -> str:
-    # remove leading bullets and join into one paragraph
     lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
     cleaned = []
     for ln in lines:
@@ -64,7 +75,6 @@ def ensure_paragraph(text: str) -> str:
             ln = ln.lstrip("-•* ").strip()
         cleaned.append(ln)
     para = " ".join(cleaned)
-    # Collapse multiple spaces
     while "  " in para:
         para = para.replace("  ", " ")
     return para.strip()
@@ -83,7 +93,6 @@ uploaded_file = st.file_uploader("Upload Excel Line Listing", type=["xlsx"])
 if uploaded_file is not None:
 
     df = pd.read_excel(uploaded_file)
-
     st.subheader("Preview of Uploaded Data")
     st.dataframe(df.head(20))
 
@@ -124,6 +133,9 @@ if uploaded_file is not None:
     st.subheader("Auto-grouped Topics (by Event PT)")
     st.dataframe(topic_table.head(50))
 
+    # ----------------------------
+    # Mode Selection
+    # ----------------------------
     mode = st.radio(
         "Choose Mode",
         ["Single PT Deep Dive (PBRER / Signal Assessment)",
@@ -144,9 +156,9 @@ if uploaded_file is not None:
             "narrative_snippets": subset[narr_col].dropna().astype(str).head(2).tolist() if narr_col else [],
         }
 
-    # ----------------------------
-    # SINGLE PT MODE (STABLE)
-    # ----------------------------
+    # ==================================================
+    # SINGLE PT MODE (STABILIZED JSON OUTPUT)
+    # ==================================================
     if mode.startswith("Single"):
 
         pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
@@ -156,7 +168,7 @@ if uploaded_file is not None:
             subset = df[df[pt_col] == pt_choice]
             evidence = build_evidence(subset, pt_choice)
 
-            # Force JSON output so YOU control order and formatting
+            # Force JSON so we control order & formatting
             prompt = f"""
 You are a senior pharmacovigilance physician.
 
@@ -173,13 +185,30 @@ Return ONLY valid JSON (no markdown, no extra text). Use this exact schema and k
   "Recommended Next Action": "string"
 }}
 
-Rules:
-- Each value must be plain text.
-- "PBRER-Ready Summary" must be ONE paragraph (no bullets, no line breaks), 140–180 words.
-- Do NOT fabricate regulatory actions; if uncertain write: "No widely recognized regulatory action specific to this drug-event combination."
-- Evidence-based, formal regulatory tone.
+STRICT RULES:
+1) Background of Drug-Event Combination MUST be product-level background ONLY:
+   - pharmacologic class / mechanism relevant to the event
+   - known class effects
+   - general pregnancy/lactation considerations if broadly known
+   - labeling recognition in general terms (if broadly known)
+   - DO NOT include any case counts, countries, listedness, seriousness numbers, or reporting interval details.
+   - DO NOT mention "France", "Switzerland", "n=...", "%", "cases", "serious", "fatal", "listed/unlisted".
 
-EVIDENCE:
+2) Case Synopsis MUST contain ALL reporting interval details:
+   - total cases, seriousness, fatality, geography, listedness, timing, confounders, and brief clinical description.
+
+3) Regulatory Landscape Overview:
+   - Do NOT fabricate regulatory actions.
+   - If uncertain, write exactly:
+     "No widely recognized regulatory action specific to this drug-event combination."
+
+4) PBRER-Ready Summary:
+   - ONE paragraph only (NO bullets, NO line breaks)
+   - 140–180 words
+   - Integrate evidence from Case Synopsis + Bradford Hill + Causality Conclusion + Safety Topic Decision
+   - Do NOT add new facts
+
+EVIDENCE (reporting interval):
 {evidence}
 """
 
@@ -190,47 +219,38 @@ EVIDENCE:
             raw = resp.choices[0].message.content
             data = json_or_none(raw)
 
-            # If JSON fails, do one auto-repair attempt
+            # One repair attempt if JSON failed
             if data is None:
                 repair = client.chat.completions.create(
                     model="gpt-5",
-                    messages=[
-                        {"role": "user", "content": "Convert the following into ONLY valid JSON matching the exact schema. Output JSON only.\n\n" + raw}
-                    ],
+                    messages=[{"role": "user", "content": "Convert the following into ONLY valid JSON matching the exact schema. Output JSON only.\n\n" + raw}],
                 )
-                raw2 = repair.choices[0].message.content
-                data = json_or_none(raw2)
+                data = json_or_none(repair.choices[0].message.content)
 
             if data is None:
-                st.error("Model output was not valid JSON. Showing raw output below (copy/paste for debugging):")
+                st.error("Model output was not valid JSON. Showing raw output for debugging:")
                 st.code(raw)
                 st.stop()
 
-            # Enforce summary paragraph even if model slips
+            # Enforce paragraph summary even if model slips
             summary = str(data.get("PBRER-Ready Summary", "")).strip()
             if looks_like_bullets(summary) or "\n" in summary:
-                # light post-process first
                 summary_fixed = ensure_paragraph(summary)
 
-                # If still bulletish or too short/long, do a small repair call
-                if looks_like_bullets(summary_fixed) or len(summary_fixed.split()) < 80:
-                    fix_prompt = f"""
-Rewrite the following into a single regulatory narrative paragraph (NO bullets, NO line breaks), 140–180 words.
-Do not add new facts. Keep benefit–risk position at the end.
+                # If still not good, do a micro-fix call
+                fix_prompt = f"""
+Rewrite into a single regulatory narrative paragraph (NO bullets, NO line breaks), 140–180 words.
+Do not add new facts. End with benefit–risk position.
 
 TEXT:
 {summary}
 """
-                    fix = client.chat.completions.create(
-                        model="gpt-5",
-                        messages=[{"role": "user", "content": fix_prompt}],
-                    )
-                    summary_fixed = ensure_paragraph(fix.choices[0].message.content)
-
+                fix = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=[{"role": "user", "content": fix_prompt}],
+                )
+                summary_fixed = ensure_paragraph(fix.choices[0].message.content)
                 data["PBRER-Ready Summary"] = summary_fixed
-
-            # Display in app in YOUR chosen order
-            st.subheader(f"Deep Dive – {pt_choice}")
 
             ORDER = [
                 "Background of Drug-Event Combination",
@@ -243,9 +263,11 @@ TEXT:
                 "Recommended Next Action",
             ]
 
+            # Display in app in fixed order
+            st.subheader(f"Deep Dive – {pt_choice}")
             for k in ORDER:
                 st.markdown(f"### {k}")
-                st.write(data.get(k, "").strip())
+                st.write(str(data.get(k, "")).strip())
 
             # ---------------- Word Export ----------------
             document = Document()
@@ -259,11 +281,9 @@ TEXT:
                 document.add_heading(k, level=3)
                 val = str(data.get(k, "")).strip()
                 if k == "PBRER-Ready Summary":
-                    # enforce single paragraph in Word
                     val = ensure_paragraph(val)
                     document.add_paragraph(val)
                 else:
-                    # preserve line breaks if any
                     parts = [p for p in val.split("\n") if p.strip()]
                     if not parts:
                         document.add_paragraph("")
@@ -290,16 +310,19 @@ TEXT:
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 
-    # ----------------------------
-    # BULK MODE (unchanged)
-    # ----------------------------
+    # ==================================================
+    # BULK MODE
+    # ==================================================
     else:
+
         TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
 
         if st.button("Analyze Top PTs"):
+
             top_pts = topic_table.head(TOP_N)[pt_col].tolist()
 
             for pt in top_pts:
+
                 subset = df[df[pt_col] == pt]
                 evidence = build_evidence(subset, pt)
 
