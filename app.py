@@ -34,13 +34,16 @@ try:
     api_key = st.secrets.get("OPENAI_API_KEY")
 except Exception:
     api_key = None
+
 if not api_key:
     api_key = os.getenv("OPENAI_API_KEY")
+
 if not api_key:
     st.error("OpenAI API key not found. Add OPENAI_API_KEY in Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
 client = OpenAI(api_key=api_key)
+
 
 def call_openai(user_prompt: str, model: str = "gpt-5") -> str:
     r = client.chat.completions.create(
@@ -51,6 +54,7 @@ def call_openai(user_prompt: str, model: str = "gpt-5") -> str:
         ],
     )
     return r.choices[0].message.content
+
 
 # ============================
 # Helpers
@@ -68,12 +72,15 @@ def find_col(df, candidates):
                 return cols[i]
     return None
 
+
 def yes_count(series):
     s = series.astype(str).str.strip().str.lower()
     return int(s.isin(["y", "yes", "true", "1"]).sum())
 
+
 def top_values(series, n=5):
     return series.dropna().astype(str).value_counts().head(n).to_dict()
+
 
 def json_or_none(s: str):
     try:
@@ -81,8 +88,10 @@ def json_or_none(s: str):
     except Exception:
         return None
 
+
 def must_have_keys(d, keys):
     return isinstance(d, dict) and all(k in d for k in keys)
+
 
 def rating_norm(s: str) -> str:
     if not s:
@@ -101,6 +110,7 @@ def rating_norm(s: str) -> str:
     if "high" in s:
         return "High"
     return s.title()
+
 
 def decision_matrix(overall_evidence: str, confounding: str):
     overall = rating_norm(overall_evidence)
@@ -129,6 +139,7 @@ def decision_matrix(overall_evidence: str, confounding: str):
 
     return causality, decision
 
+
 def ensure_single_paragraph(text: str) -> str:
     lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
     cleaned = []
@@ -141,8 +152,30 @@ def ensure_single_paragraph(text: str) -> str:
         para = para.replace("  ", " ")
     return para
 
+
 def word_count(s: str) -> int:
     return len(re.findall(r"\b\w+\b", s or ""))
+
+
+def split_to_paragraphs(s: str):
+    # keeps short paragraphs; removes bullet markers if they appear
+    lines = [ln.rstrip() for ln in str(s).splitlines()]
+    out = []
+    buf = []
+    for ln in lines:
+        t = ln.strip()
+        if not t:
+            if buf:
+                out.append(" ".join(buf).strip())
+                buf = []
+            continue
+        if t.startswith(("-", "•", "*")):
+            t = t.lstrip("-•* ").strip()
+        buf.append(t)
+    if buf:
+        out.append(" ".join(buf).strip())
+    return out
+
 
 # ============================
 # Upload Excel
@@ -314,10 +347,8 @@ EVIDENCE:
             st.code(raw_scores)
             st.stop()
 
-        # deterministic outputs
         matrix_causality, matrix_decision = decision_matrix(scores.get("Overall Evidence", ""), scores.get("Confounding", ""))
 
-        # allow locks
         final_causality = matrix_causality if lock_causality == "(Use matrix result)" else lock_causality
         final_decision = matrix_decision if lock_decision == "(Use matrix result)" else lock_decision
 
@@ -347,19 +378,20 @@ Return ONLY valid JSON (no markdown) with EXACT keys:
 
 RULES:
 - Output ALL keys in EXACT order above.
-- Background: product-level only, <=120 words, single paragraph, no case counts.
+- Background: product-level only, <=120 words, ONE paragraph, no case counts/countries.
+- Case Synopsis: evidence-only reporting interval summary (counts, seriousness, geography, listedness, patterns, confounders). No pharmacology.
 - Regulatory Implications: NO browsing; do not invent safety communications.
   If uncertain, write exactly:
   "No widely recognized regulatory action specific to this drug-event combination."
 - Use EXACT standardized outputs:
   Causality Conclusion: "{final_causality}"
   Safety Topic Decision: "{final_decision}"
-- Do not output bullet-only sections; short paragraphs are preferred.
+- Avoid bullet-only sections; short paragraphs preferred. No headings inside values.
 
 PRODUCT CONTEXT:
 {product_context_string()}
 
-SCORING (for context only; do not restate as a table):
+SCORING (context only):
 {scores}
 
 EVIDENCE:
@@ -376,7 +408,7 @@ EVIDENCE:
             st.code(raw_struct)
             st.stop()
 
-        # enforce background formatting
+        # enforce formatting
         data["Background of Drug-Event Combination"] = ensure_single_paragraph(data.get("Background of Drug-Event Combination", ""))
 
         # Display
@@ -390,7 +422,7 @@ EVIDENCE:
             st.markdown(f"### {k}")
             st.write(str(data.get(k, "")).strip())
 
-        # Word export
+        # Word export (NO Evidence Snapshot)
         doc = Document()
         doc.add_heading("Signal Assessment Report", level=1)
         doc.add_paragraph(f"Event PT: {pt_choice}")
@@ -408,11 +440,8 @@ EVIDENCE:
         doc.add_heading("Structured Assessment", level=2)
         for k in section_keys:
             doc.add_heading(k, level=3)
-            doc.add_paragraph(str(data.get(k, "")).strip())
-
-        doc.add_page_break()
-        doc.add_heading("Evidence Snapshot", level=2)
-        doc.add_paragraph(json.dumps(evidence, indent=2))
+            for p in split_to_paragraphs(str(data.get(k, "")).strip()):
+                doc.add_paragraph(p)
 
         buf = io.BytesIO()
         doc.save(buf)
@@ -439,18 +468,19 @@ elif mode.startswith("PBRER Summary"):
         prompt = f"""
 Write a PBRER-ready aggregate synopsis for the reporting interval.
 
-Return ONLY valid JSON with EXACT keys:
+Return ONLY valid JSON with EXACT key:
 {{
   "PBRER Summary": "string"
 }}
 
 RULES for "PBRER Summary":
-- ONE continuous paragraph (no bullets, no line breaks, no labels, no colons like 'Decision:')
+- ONE continuous paragraph (no bullets, no line breaks, no labels, no colon-style headings)
 - 140–190 words
-- Include: case counts (use unique_case_count if provided, otherwise row_count), seriousness, fatalities, geography, listedness, key clinical pattern(s), confounders/alternative etiologies, and an overall benefit–risk position sentence at the end.
-- Do NOT mention Bradford Hill explicitly.
-- Do NOT invent regulatory actions.
-- Use only evidence provided.
+- Include: case counts (use unique_case_count if provided, otherwise row_count), seriousness, fatalities, geography, listedness, key clinical pattern(s), confounders/alternative etiologies
+- End with explicit benefit–risk position sentence
+- Do NOT mention Bradford Hill explicitly
+- Do NOT invent regulatory actions
+- Use only evidence provided
 
 PRODUCT CONTEXT:
 {product_context_string()}
@@ -471,7 +501,7 @@ EVIDENCE:
 
         summary = ensure_single_paragraph(data["PBRER Summary"])
         wc = word_count(summary)
-        if wc < 130 or wc > 210:
+        if wc < 140 or wc > 190:
             fix = call_openai(
                 f"Rewrite into ONE paragraph, 140–190 words, no bullets/labels/line breaks, no new facts. End with benefit–risk sentence.\n\nTEXT:\n{summary}"
             )
@@ -480,15 +510,12 @@ EVIDENCE:
         st.subheader(f"PBRER Summary – {pt_choice}")
         st.write(summary)
 
+        # Word export (NO Evidence Snapshot)
         doc = Document()
         doc.add_heading("PBRER Summary (Aggregate Synopsis)", level=1)
         doc.add_paragraph(f"Event PT: {pt_choice}")
         doc.add_paragraph("")
         doc.add_paragraph(summary)
-
-        doc.add_page_break()
-        doc.add_heading("Evidence Snapshot", level=2)
-        doc.add_paragraph(json.dumps(evidence, indent=2))
 
         buf = io.BytesIO()
         doc.save(buf)
