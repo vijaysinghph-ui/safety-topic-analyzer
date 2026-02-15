@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
@@ -32,17 +33,12 @@ def find_col(df, candidates):
     cols_l = [str(c).lower().strip() for c in cols]
     for cand in candidates:
         cand_l = cand.lower()
-
-        # exact match
         for i, c in enumerate(cols_l):
             if c == cand_l:
                 return cols[i]
-
-        # contains match
         for i, c in enumerate(cols_l):
             if cand_l in c:
                 return cols[i]
-
     return None
 
 def yes_count(series):
@@ -51,6 +47,33 @@ def yes_count(series):
 
 def top_values(series, n=5):
     return series.dropna().astype(str).value_counts().head(n).to_dict()
+
+def looks_like_bullets(text: str) -> bool:
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if not lines:
+        return False
+    bulletish = sum(1 for ln in lines if ln.startswith(("-", "•", "*")) or ln[:2].isdigit() and ln[1] == ")")
+    return bulletish >= max(2, int(0.4 * len(lines)))
+
+def ensure_paragraph(text: str) -> str:
+    # remove leading bullets and join into one paragraph
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    cleaned = []
+    for ln in lines:
+        if ln.startswith(("-", "•", "*")):
+            ln = ln.lstrip("-•* ").strip()
+        cleaned.append(ln)
+    para = " ".join(cleaned)
+    # Collapse multiple spaces
+    while "  " in para:
+        para = para.replace("  ", " ")
+    return para.strip()
+
+def json_or_none(s: str):
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
 
 # ----------------------------
 # Upload Excel
@@ -101,15 +124,10 @@ if uploaded_file is not None:
     st.subheader("Auto-grouped Topics (by Event PT)")
     st.dataframe(topic_table.head(50))
 
-    # ----------------------------
-    # Mode Selection
-    # ----------------------------
     mode = st.radio(
         "Choose Mode",
-        [
-            "Single PT Deep Dive (PBRER / Signal Assessment)",
-            "Bulk Trending (Monthly Scan)"
-        ]
+        ["Single PT Deep Dive (PBRER / Signal Assessment)",
+         "Bulk Trending (Monthly Scan)"]
     )
 
     def build_evidence(subset, pt_value):
@@ -126,9 +144,9 @@ if uploaded_file is not None:
             "narrative_snippets": subset[narr_col].dropna().astype(str).head(2).tolist() if narr_col else [],
         }
 
-    # ==================================================
-    # SINGLE PT MODE + WORD EXPORT
-    # ==================================================
+    # ----------------------------
+    # SINGLE PT MODE (STABLE)
+    # ----------------------------
     if mode.startswith("Single"):
 
         pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
@@ -138,101 +156,83 @@ if uploaded_file is not None:
             subset = df[df[pt_col] == pt_choice]
             evidence = build_evidence(subset, pt_choice)
 
+            # Force JSON output so YOU control order and formatting
             prompt = f"""
-You are a senior pharmacovigilance physician preparing a regulatory-grade PBRER safety topic evaluation.
+You are a senior pharmacovigilance physician.
 
-Write in formal regulatory tone suitable for inclusion in a PBRER or signal validation report.
-Be objective, evidence-based, and non-speculative.
-Clearly separate evidence from interpretation.
+Return ONLY valid JSON (no markdown, no extra text). Use this exact schema and keys:
 
-Provide the following clearly separated sections using EXACT section titles and in EXACT order:
+{{
+  "Background of Drug-Event Combination": "string",
+  "Case Synopsis": "string",
+  "Bradford Hill Assessment": "string",
+  "Regulatory Landscape Overview": "string",
+  "Causality Conclusion": "string",
+  "Safety Topic Decision": "string",
+  "PBRER-Ready Summary": "string",
+  "Recommended Next Action": "string"
+}}
 
-Background of Drug-Event Combination
-Case Synopsis
-Bradford Hill Assessment
-Regulatory Landscape Overview
-Causality Conclusion
-Safety Topic Decision
-PBRER-Ready Summary
-Recommended Next Action
+Rules:
+- Each value must be plain text.
+- "PBRER-Ready Summary" must be ONE paragraph (no bullets, no line breaks), 140–180 words.
+- Do NOT fabricate regulatory actions; if uncertain write: "No widely recognized regulatory action specific to this drug-event combination."
+- Evidence-based, formal regulatory tone.
 
---------------------------
-SECTION REQUIREMENTS
---------------------------
-
-Background of Drug-Event Combination:
-- Brief pharmacological context relevant to the event.
-- Known class effects.
-- General labeling recognition (if broadly known).
-- Do NOT fabricate regulatory history.
-
-Case Synopsis:
-- Total cases, seriousness, fatality.
-- Key clinical patterns.
-- Confounders and alternative etiologies.
-- No interpretation.
-
-Bradford Hill Assessment:
-Evaluate concisely:
-- Strength
-- Consistency
-- Specificity
-- Temporality
-- Biological Gradient (if assessable)
-- Plausibility
-- Coherence
-- Experiment (dechallenge/rechallenge)
-- Analogy
-
-Regulatory Landscape Overview:
-- State whether widely recognized regulatory actions (FDA, EMA, MHRA) exist for this drug-event combination.
-- If none are broadly established, state:
-  "No widely recognized regulatory action specific to this drug-event combination."
-- Do NOT invent warnings or communications.
-
-Causality Conclusion:
-- Supported / Possible / Insufficient Evidence / Unlikely
-- Justify in 2–3 sentences.
-
-Safety Topic Decision:
-- Include / Continue Monitoring / Close / Escalate for Signal Validation
-- Must logically follow from Causality Conclusion.
-
-PBRER-Ready Summary:
-- Continuous regulatory narrative paragraph (NO bullet points).
-- 140–180 words.
-- Integrate evidence + Hill reasoning + conclusion + decision.
-- Do NOT introduce new facts.
-- End with benefit–risk position statement.
-
-Recommended Next Action:
-- Clear PV action plan (routine monitoring, targeted follow-up, signal validation, labeling review, etc.).
-
---------------------------
-EVIDENCE
---------------------------
+EVIDENCE:
 {evidence}
 """
 
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model="gpt-5",
                 messages=[{"role": "user", "content": prompt}],
             )
+            raw = resp.choices[0].message.content
+            data = json_or_none(raw)
 
-            output_text = response.choices[0].message.content
+            # If JSON fails, do one auto-repair attempt
+            if data is None:
+                repair = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=[
+                        {"role": "user", "content": "Convert the following into ONLY valid JSON matching the exact schema. Output JSON only.\n\n" + raw}
+                    ],
+                )
+                raw2 = repair.choices[0].message.content
+                data = json_or_none(raw2)
 
+            if data is None:
+                st.error("Model output was not valid JSON. Showing raw output below (copy/paste for debugging):")
+                st.code(raw)
+                st.stop()
+
+            # Enforce summary paragraph even if model slips
+            summary = str(data.get("PBRER-Ready Summary", "")).strip()
+            if looks_like_bullets(summary) or "\n" in summary:
+                # light post-process first
+                summary_fixed = ensure_paragraph(summary)
+
+                # If still bulletish or too short/long, do a small repair call
+                if looks_like_bullets(summary_fixed) or len(summary_fixed.split()) < 80:
+                    fix_prompt = f"""
+Rewrite the following into a single regulatory narrative paragraph (NO bullets, NO line breaks), 140–180 words.
+Do not add new facts. Keep benefit–risk position at the end.
+
+TEXT:
+{summary}
+"""
+                    fix = client.chat.completions.create(
+                        model="gpt-5",
+                        messages=[{"role": "user", "content": fix_prompt}],
+                    )
+                    summary_fixed = ensure_paragraph(fix.choices[0].message.content)
+
+                data["PBRER-Ready Summary"] = summary_fixed
+
+            # Display in app in YOUR chosen order
             st.subheader(f"Deep Dive – {pt_choice}")
-            st.write(output_text)
 
-            # ---------------- Word Export ----------------
-            document = Document()
-            document.add_heading("Safety Topic Evaluation Report", level=1)
-            document.add_paragraph(f"Event PT: {pt_choice}")
-            document.add_paragraph("")
-
-            document.add_heading("Evaluation", level=2)
-
-            SECTION_TITLES = [
+            ORDER = [
                 "Background of Drug-Event Combination",
                 "Case Synopsis",
                 "Bradford Hill Assessment",
@@ -243,29 +243,33 @@ EVIDENCE
                 "Recommended Next Action",
             ]
 
-            lines = [ln.rstrip() for ln in output_text.splitlines()]
-            current_title = None
-            buffer = []
+            for k in ORDER:
+                st.markdown(f"### {k}")
+                st.write(data.get(k, "").strip())
 
-            def flush_section(title, buf):
-                if not title:
-                    return
-                document.add_heading(title, level=3)
-                text = "\n".join([b for b in buf if b.strip() != ""]).strip()
-                if text:
-                    for para in text.split("\n"):
-                        document.add_paragraph(para)
+            # ---------------- Word Export ----------------
+            document = Document()
+            document.add_heading("Safety Topic Evaluation Report", level=1)
+            document.add_paragraph(f"Event PT: {pt_choice}")
+            document.add_paragraph("")
 
-            for ln in lines:
-                stripped = ln.strip()
-                if stripped in SECTION_TITLES:
-                    flush_section(current_title, buffer)
-                    current_title = stripped
-                    buffer = []
+            document.add_heading("Evaluation", level=2)
+
+            for k in ORDER:
+                document.add_heading(k, level=3)
+                val = str(data.get(k, "")).strip()
+                if k == "PBRER-Ready Summary":
+                    # enforce single paragraph in Word
+                    val = ensure_paragraph(val)
+                    document.add_paragraph(val)
                 else:
-                    buffer.append(ln)
-
-            flush_section(current_title, buffer)
+                    # preserve line breaks if any
+                    parts = [p for p in val.split("\n") if p.strip()]
+                    if not parts:
+                        document.add_paragraph("")
+                    else:
+                        for p in parts:
+                            document.add_paragraph(p)
 
             document.add_page_break()
             document.add_heading("Data Snapshot", level=2)
@@ -286,19 +290,16 @@ EVIDENCE
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 
-    # ==================================================
-    # BULK MODE
-    # ==================================================
+    # ----------------------------
+    # BULK MODE (unchanged)
+    # ----------------------------
     else:
-
         TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
 
         if st.button("Analyze Top PTs"):
-
             top_pts = topic_table.head(TOP_N)[pt_col].tolist()
 
             for pt in top_pts:
-
                 subset = df[df[pt_col] == pt]
                 evidence = build_evidence(subset, pt)
 
@@ -322,7 +323,6 @@ Evidence:
                 )
 
                 output_text = response.choices[0].message.content
-
                 st.subheader(f"Trending – {pt}")
                 st.write(output_text)
                 st.markdown("---")
