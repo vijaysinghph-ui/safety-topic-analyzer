@@ -14,16 +14,14 @@ st.set_page_config(page_title="Safety Topic Analyzer", layout="wide")
 st.title("Safety Topic Analyzer")
 
 SYSTEM_STYLE = """
-You are acting as:
-- EU QPPV-level safety physician
-- Experienced in PBRER, signal validation, and regulatory inspection defense
-- Writing content that may be reviewed by EMA, MHRA, or FDA
+You are acting as an EU QPPV-level safety physician.
+You are experienced in signal validation and signal assessment, and your writing may be reviewed by EMA, MHRA, or FDA.
 
-Your writing must:
-- Be inspection-ready
-- Be conservative and evidence-based
-- Avoid speculative statements
-- Avoid emotional or persuasive language
+Writing rules:
+- Inspection-ready and conservative.
+- Evidence-based only; avoid speculation.
+- Neutral tone; no persuasive language.
+- If data is insufficient, explicitly state limitations.
 """.strip()
 
 # ============================
@@ -44,7 +42,6 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-
 def call_openai(user_prompt: str, model: str = "gpt-5") -> str:
     r = client.chat.completions.create(
         model=model,
@@ -54,7 +51,6 @@ def call_openai(user_prompt: str, model: str = "gpt-5") -> str:
         ],
     )
     return r.choices[0].message.content
-
 
 # ============================
 # Helpers
@@ -72,15 +68,12 @@ def find_col(df, candidates):
                 return cols[i]
     return None
 
-
 def yes_count(series):
     s = series.astype(str).str.strip().str.lower()
     return int(s.isin(["y", "yes", "true", "1"]).sum())
 
-
 def top_values(series, n=5):
     return series.dropna().astype(str).value_counts().head(n).to_dict()
-
 
 def json_or_none(s: str):
     try:
@@ -88,10 +81,8 @@ def json_or_none(s: str):
     except Exception:
         return None
 
-
 def must_have_keys(d, keys):
     return isinstance(d, dict) and all(k in d for k in keys)
-
 
 def rating_norm(s: str) -> str:
     if not s:
@@ -111,35 +102,6 @@ def rating_norm(s: str) -> str:
         return "High"
     return s.title()
 
-
-def decision_matrix(overall_evidence: str, confounding: str):
-    overall = rating_norm(overall_evidence)
-    conf = rating_norm(confounding)
-
-    if overall == "Strong":
-        causality = "Supported"
-        decision = "Include / Escalate for Risk Evaluation"
-    elif overall == "Moderate":
-        if conf == "Low":
-            causality = "Possible"
-            decision = "Escalate for Signal Validation"
-        else:
-            causality = "Possible"
-            decision = "Continue Monitoring"
-    elif overall == "Weak":
-        if conf == "High":
-            causality = "Unlikely"
-            decision = "Close"
-        else:
-            causality = "Insufficient Evidence"
-            decision = "Continue Monitoring"
-    else:
-        causality = "Insufficient Evidence"
-        decision = "Continue Monitoring"
-
-    return causality, decision
-
-
 def ensure_single_paragraph(text: str) -> str:
     lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
     cleaned = []
@@ -152,30 +114,11 @@ def ensure_single_paragraph(text: str) -> str:
         para = para.replace("  ", " ")
     return para
 
-
-def word_count(s: str) -> int:
-    return len(re.findall(r"\b\w+\b", s or ""))
-
-
-def split_to_paragraphs(s: str):
-    # keeps short paragraphs; removes bullet markers if they appear
-    lines = [ln.rstrip() for ln in str(s).splitlines()]
-    out = []
-    buf = []
-    for ln in lines:
-        t = ln.strip()
-        if not t:
-            if buf:
-                out.append(" ".join(buf).strip())
-                buf = []
-            continue
-        if t.startswith(("-", "•", "*")):
-            t = t.lstrip("-•* ").strip()
-        buf.append(t)
-    if buf:
-        out.append(" ".join(buf).strip())
-    return out
-
+def final_signal_outcome(causality: str) -> str:
+    c = (causality or "").strip().lower()
+    if c in ["supported", "possible"]:
+        return "Signal Confirmed"
+    return "Signal Refuted"
 
 # ============================
 # Upload Excel
@@ -277,37 +220,25 @@ st.subheader("Choose Output Mode")
 mode = st.radio(
     "Mode",
     [
-        "Signal Assessment (Structured + Scoring)",
-        "PBRER Summary (Aggregate Synopsis)",
+        "Signal Assessment (with WoE table + binary outcome)",
         "Bulk Trending (Monthly Scan)",
+        "PBRER Summary (Aggregate Synopsis)",
     ],
 )
 
 # ==================================================
-# MODE 1: Signal Assessment (Structured + Scoring)
+# MODE 1: Signal Assessment
 # ==================================================
 if mode.startswith("Signal Assessment"):
-    st.subheader("Signal Assessment (Structured + Scoring)")
+    st.subheader("Signal Assessment (Structured + WoE + Binary Outcome)")
 
     pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
-
-    st.markdown("#### Optional: lock standardized outputs (recommended)")
-    lock_causality = st.selectbox(
-        "Causality Conclusion (optional)",
-        ["(Use matrix result)", "Supported", "Possible", "Insufficient Evidence", "Unlikely"],
-        index=0,
-    )
-    lock_decision = st.selectbox(
-        "Safety Topic Decision (optional)",
-        ["(Use matrix result)", "Include", "Continue Monitoring", "Close", "Escalate for Signal Validation", "Include / Escalate for Risk Evaluation"],
-        index=0,
-    )
 
     if st.button("Generate Signal Assessment + Word"):
         subset = df[df[pt_col] == pt_choice]
         evidence = build_evidence(subset, pt_choice)
 
-        # ---- Step 1: Scoring JSON ----
+        # ---- Step 1: WoE scoring JSON ----
         score_keys = [
             "Strength",
             "Consistency",
@@ -315,7 +246,8 @@ if mode.startswith("Signal Assessment"):
             "Plausibility",
             "Confounding",
             "Overall Evidence",
-            "Rationale (brief)"
+            "Rationale (brief)",
+            "Causality Conclusion",
         ]
 
         score_prompt = f"""
@@ -328,10 +260,14 @@ Return ONLY valid JSON with EXACT keys:
   "Plausibility": "Weak/Moderate/Strong",
   "Confounding": "Low/Moderate/High",
   "Overall Evidence": "Weak/Moderate/Strong",
-  "Rationale (brief)": "2-4 sentences, evidence-based, inspection-ready"
+  "Rationale (brief)": "2-3 sentences, evidence-based, inspection-ready",
+  "Causality Conclusion": "Supported/Possible/Insufficient Evidence/Unlikely"
 }}
 
 Use only provided evidence. No speculation.
+
+PRODUCT CONTEXT:
+{product_context_string()}
 
 EVIDENCE:
 {evidence}
@@ -347,20 +283,21 @@ EVIDENCE:
             st.code(raw_scores)
             st.stop()
 
-        matrix_causality, matrix_decision = decision_matrix(scores.get("Overall Evidence", ""), scores.get("Confounding", ""))
+        # Normalize ratings + binary outcome
+        for k in ["Strength", "Consistency", "Temporality", "Plausibility", "Confounding", "Overall Evidence"]:
+            scores[k] = rating_norm(scores.get(k, ""))
 
-        final_causality = matrix_causality if lock_causality == "(Use matrix result)" else lock_causality
-        final_decision = matrix_decision if lock_decision == "(Use matrix result)" else lock_decision
+        causality = str(scores.get("Causality Conclusion", "")).strip()
+        signal_outcome = final_signal_outcome(causality)
 
-        # ---- Step 2: Structured Signal Assessment (JSON) ----
+        # ---- Step 2: Structured narrative JSON (NO PBRER summary here) ----
         section_keys = [
             "Background of Drug-Event Combination",
             "Case Synopsis",
             "Bradford Hill Assessment",
             "Regulatory Implications",
             "Causality Conclusion",
-            "Safety Topic Decision",
-            "Recommended Next Action",
+            "Final Signal Outcome",
         ]
 
         structured_prompt = f"""
@@ -372,29 +309,27 @@ Return ONLY valid JSON (no markdown) with EXACT keys:
   "Bradford Hill Assessment": "string",
   "Regulatory Implications": "string",
   "Causality Conclusion": "string",
-  "Safety Topic Decision": "string",
-  "Recommended Next Action": "string"
+  "Final Signal Outcome": "string"
 }}
 
 RULES:
 - Output ALL keys in EXACT order above.
-- Background: product-level only, <=120 words, ONE paragraph, no case counts/countries.
-- Case Synopsis: evidence-only reporting interval summary (counts, seriousness, geography, listedness, patterns, confounders). No pharmacology.
+- Background: product-level only, <=120 words, single paragraph, no case counts.
 - Regulatory Implications: NO browsing; do not invent safety communications.
   If uncertain, write exactly:
   "No widely recognized regulatory action specific to this drug-event combination."
-- Use EXACT standardized outputs:
-  Causality Conclusion: "{final_causality}"
-  Safety Topic Decision: "{final_decision}"
-- Avoid bullet-only sections; short paragraphs preferred. No headings inside values.
+- Use these EXACT values:
+  Causality Conclusion: "{causality}"
+  Final Signal Outcome: "{signal_outcome}"
+- Keep sections as short paragraphs. Avoid bullet-only sections.
 
 PRODUCT CONTEXT:
 {product_context_string()}
 
-SCORING (context only):
+Woe Scores (context only):
 {scores}
 
-EVIDENCE:
+REPORTING INTERVAL EVIDENCE:
 {evidence}
 """
         raw_struct = call_openai(structured_prompt)
@@ -408,44 +343,74 @@ EVIDENCE:
             st.code(raw_struct)
             st.stop()
 
-        # enforce formatting
         data["Background of Drug-Event Combination"] = ensure_single_paragraph(data.get("Background of Drug-Event Combination", ""))
 
-        # Display
-        st.markdown("### Scoring + Matrix")
-        st.write({"Scoring": scores, "Matrix Causality": matrix_causality, "Matrix Decision": matrix_decision})
-        st.markdown("### Final Standardized Outputs")
-        st.write({"Causality Conclusion": final_causality, "Safety Topic Decision": final_decision})
+        # ---- Display in app ----
+        st.markdown("### Signal Weight-of-Evidence (WoE) Summary")
+        woe_df = pd.DataFrame(
+            [
+                ["Strength", scores.get("Strength", "")],
+                ["Consistency", scores.get("Consistency", "")],
+                ["Temporality", scores.get("Temporality", "")],
+                ["Plausibility", scores.get("Plausibility", "")],
+                ["Confounding", scores.get("Confounding", "")],
+                ["Overall Evidence", scores.get("Overall Evidence", "")],
+            ],
+            columns=["Criterion", "Rating"],
+        )
+        st.table(woe_df)
+
+        st.markdown("### Rationale (brief)")
+        st.write(str(scores.get("Rationale (brief)", "")).strip())
+
+        st.markdown("### Final Outputs")
+        st.write({"Causality Conclusion": causality, "Final Signal Outcome": signal_outcome})
 
         st.subheader(f"Signal Assessment – {pt_choice}")
         for k in section_keys:
             st.markdown(f"### {k}")
             st.write(str(data.get(k, "")).strip())
 
-        # Word export (NO Evidence Snapshot)
+        # ---- Word export ----
         doc = Document()
         doc.add_heading("Signal Assessment Report", level=1)
         doc.add_paragraph(f"Event PT: {pt_choice}")
         doc.add_paragraph("")
 
-        doc.add_heading("Scoring + Matrix", level=2)
-        for k in score_keys:
-            doc.add_paragraph(f"{k}: {scores.get(k, '')}")
-        doc.add_paragraph(f"Matrix Causality: {matrix_causality}")
-        doc.add_paragraph(f"Matrix Decision: {matrix_decision}")
-        doc.add_paragraph(f"Final Causality Conclusion: {final_causality}")
-        doc.add_paragraph(f"Final Safety Topic Decision: {final_decision}")
+        doc.add_heading("Signal Weight-of-Evidence (WoE) Summary", level=2)
+        t = doc.add_table(rows=1, cols=2)
+        t.rows[0].cells[0].text = "Criterion"
+        t.rows[0].cells[1].text = "Rating"
+        for row in [
+            ("Strength", scores.get("Strength", "")),
+            ("Consistency", scores.get("Consistency", "")),
+            ("Temporality", scores.get("Temporality", "")),
+            ("Plausibility", scores.get("Plausibility", "")),
+            ("Confounding", scores.get("Confounding", "")),
+            ("Overall Evidence", scores.get("Overall Evidence", "")),
+        ]:
+            r = t.add_row().cells
+            r[0].text = row[0]
+            r[1].text = str(row[1])
+
+        doc.add_paragraph("")
+        doc.add_heading("Rationale (brief)", level=2)
+        doc.add_paragraph(str(scores.get("Rationale (brief)", "")).strip())
+
+        doc.add_heading("Final Outputs", level=2)
+        doc.add_paragraph(f"Causality Conclusion: {causality}")
+        doc.add_paragraph(f"Final Signal Outcome: {signal_outcome}")
 
         doc.add_page_break()
         doc.add_heading("Structured Assessment", level=2)
         for k in section_keys:
             doc.add_heading(k, level=3)
-            for p in split_to_paragraphs(str(data.get(k, "")).strip()):
-                doc.add_paragraph(p)
+            doc.add_paragraph(str(data.get(k, "")).strip())
 
         buf = io.BytesIO()
         doc.save(buf)
         buf.seek(0)
+
         st.download_button(
             "Download Signal Assessment (Word)",
             data=buf,
@@ -454,83 +419,9 @@ EVIDENCE:
         )
 
 # ==================================================
-# MODE 2: PBRER Summary (Aggregate Synopsis)
+# MODE 2: Bulk Trending (unchanged)
 # ==================================================
-elif mode.startswith("PBRER Summary"):
-    st.subheader("PBRER Summary (Aggregate Synopsis)")
-
-    pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
-
-    if st.button("Generate PBRER Summary + Word"):
-        subset = df[df[pt_col] == pt_choice]
-        evidence = build_evidence(subset, pt_choice)
-
-        prompt = f"""
-Write a PBRER-ready aggregate synopsis for the reporting interval.
-
-Return ONLY valid JSON with EXACT key:
-{{
-  "PBRER Summary": "string"
-}}
-
-RULES for "PBRER Summary":
-- ONE continuous paragraph (no bullets, no line breaks, no labels, no colon-style headings)
-- 140–190 words
-- Include: case counts (use unique_case_count if provided, otherwise row_count), seriousness, fatalities, geography, listedness, key clinical pattern(s), confounders/alternative etiologies
-- End with explicit benefit–risk position sentence
-- Do NOT mention Bradford Hill explicitly
-- Do NOT invent regulatory actions
-- Use only evidence provided
-
-PRODUCT CONTEXT:
-{product_context_string()}
-
-EVIDENCE:
-{evidence}
-"""
-        raw = call_openai(prompt)
-        data = json_or_none(raw)
-        if data is None or "PBRER Summary" not in data:
-            repair = call_openai("Convert into ONLY valid JSON with the exact key. Output JSON only.\n\n" + raw)
-            data = json_or_none(repair)
-
-        if data is None or "PBRER Summary" not in data:
-            st.error("Could not parse PBRER Summary JSON. Raw output below:")
-            st.code(raw)
-            st.stop()
-
-        summary = ensure_single_paragraph(data["PBRER Summary"])
-        wc = word_count(summary)
-        if wc < 140 or wc > 190:
-            fix = call_openai(
-                f"Rewrite into ONE paragraph, 140–190 words, no bullets/labels/line breaks, no new facts. End with benefit–risk sentence.\n\nTEXT:\n{summary}"
-            )
-            summary = ensure_single_paragraph(fix)
-
-        st.subheader(f"PBRER Summary – {pt_choice}")
-        st.write(summary)
-
-        # Word export (NO Evidence Snapshot)
-        doc = Document()
-        doc.add_heading("PBRER Summary (Aggregate Synopsis)", level=1)
-        doc.add_paragraph(f"Event PT: {pt_choice}")
-        doc.add_paragraph("")
-        doc.add_paragraph(summary)
-
-        buf = io.BytesIO()
-        doc.save(buf)
-        buf.seek(0)
-        st.download_button(
-            "Download PBRER Summary (Word)",
-            data=buf,
-            file_name=f"PBRER_Summary_{pt_choice}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-
-# ==================================================
-# MODE 3: Bulk Trending (unchanged)
-# ==================================================
-else:
+elif mode.startswith("Bulk Trending"):
     st.subheader("Bulk Trending (Monthly Scan)")
     TOP_N = st.slider("Number of PTs to Analyze", 3, 30, 10)
 
@@ -556,3 +447,68 @@ Evidence:
             st.subheader(f"Trending – {pt}")
             st.write(out)
             st.markdown("---")
+
+# ==================================================
+# MODE 3: PBRER Summary (optional)
+# ==================================================
+else:
+    st.subheader("PBRER Summary (Aggregate Synopsis)")
+
+    pt_choice = st.selectbox("Select Event PT", topic_table[pt_col].tolist())
+
+    if st.button("Generate PBRER Summary + Word"):
+        subset = df[df[pt_col] == pt_choice]
+        evidence = build_evidence(subset, pt_choice)
+
+        prompt = f"""
+Write a PBRER-ready aggregate synopsis for the reporting interval.
+
+Return ONLY valid JSON with EXACT keys:
+{{
+  "PBRER Summary": "string"
+}}
+
+RULES for "PBRER Summary":
+- ONE continuous paragraph (no bullets, no line breaks, no labels)
+- 140–190 words
+- Include: case counts, seriousness, fatalities, geography, listedness (if available), key clinical pattern(s), confounders/alternative etiologies, and an overall benefit–risk position sentence at the end.
+- Do NOT mention Bradford Hill explicitly.
+- Do NOT invent regulatory actions.
+- Use only evidence provided.
+
+PRODUCT CONTEXT:
+{product_context_string()}
+
+EVIDENCE:
+{evidence}
+"""
+        raw = call_openai(prompt)
+        data = json_or_none(raw)
+        if data is None or "PBRER Summary" not in data:
+            repair = call_openai("Convert into ONLY valid JSON with the exact key. Output JSON only.\n\n" + raw)
+            data = json_or_none(repair)
+
+        if data is None or "PBRER Summary" not in data:
+            st.error("Could not parse PBRER Summary JSON. Raw output below:")
+            st.code(raw)
+            st.stop()
+
+        summary = ensure_single_paragraph(data["PBRER Summary"])
+        st.subheader(f"PBRER Summary – {pt_choice}")
+        st.write(summary)
+
+        doc = Document()
+        doc.add_heading("PBRER Summary (Aggregate Synopsis)", level=1)
+        doc.add_paragraph(f"Event PT: {pt_choice}")
+        doc.add_paragraph("")
+        doc.add_paragraph(summary)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        st.download_button(
+            "Download PBRER Summary (Word)",
+            data=buf,
+            file_name=f"PBRER_Summary_{pt_choice}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
