@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 st.set_page_config(page_title="Signal Trending Analytics", layout="wide")
 st.title("Signal Trending Analytics Dashboard")
@@ -46,6 +48,39 @@ def normalize_yes_no(series):
             }
         )
     )
+
+
+def wrap_text(text, width=100):
+    text = str(text)
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        if len(current) + len(word) + 1 <= width:
+            current = f"{current} {word}".strip()
+        else:
+            lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+def safe_top_counts(df, col_name, label_name="Label", count_name="Count", top_n=10):
+    if col_name:
+        temp = (
+            df[col_name]
+            .astype(str)
+            .value_counts()
+            .head(top_n)
+            .reset_index()
+        )
+        temp.columns = [label_name, count_name]
+        return temp
+    return pd.DataFrame(columns=[label_name, count_name])
 
 
 # =========================================================
@@ -157,6 +192,10 @@ st.sidebar.header("Filters")
 
 filtered_df = df.copy()
 
+selected_product = "All"
+selected_country = "All"
+selected_soc = "All"
+
 if prod_col:
     product_options = ["All"] + sorted(filtered_df[prod_col].dropna().astype(str).unique().tolist())
     selected_product = st.sidebar.selectbox("Product", product_options)
@@ -218,7 +257,7 @@ else:
 c1, c2 = st.columns(2)
 
 with c1:
-    st.subheader("1. Case Volume Trend")
+    st.subheader("Case Volume Trend")
     fig1 = px.bar(
         monthly_cases,
         x="Month",
@@ -228,7 +267,7 @@ with c1:
     st.plotly_chart(fig1, use_container_width=True)
 
 with c2:
-    st.subheader("2. Serious vs Non-serious Trend")
+    st.subheader("Serious vs Non-serious Trend")
     if serious_trend is not None:
         fig2 = px.bar(
             serious_trend,
@@ -244,12 +283,15 @@ with c2:
 
 # =========================================================
 # 3. Country Distribution
-# 9. Outcome Distribution
+# 4. Outcome Distribution
 # =========================================================
 c3, c4 = st.columns(2)
 
+country_counts = pd.DataFrame()
+outcome_counts = pd.DataFrame()
+
 with c3:
-    st.subheader("3. Country Distribution")
+    st.subheader("Country Distribution")
     if country_col:
         country_counts = (
             filtered_df[country_col]
@@ -270,7 +312,7 @@ with c3:
         st.info("Country column not detected.")
 
 with c4:
-    st.subheader("9. Outcome Distribution")
+    st.subheader("Outcome Distribution")
     if outcome_col:
         outcome_counts = (
             filtered_df[outcome_col]
@@ -280,18 +322,18 @@ with c4:
         )
         outcome_counts.columns = ["Outcome", "Count"]
 
-        fig9 = px.pie(
+        fig4 = px.pie(
             outcome_counts,
             names="Outcome",
             values="Count",
             title="Outcome Distribution"
         )
-        st.plotly_chart(fig9, use_container_width=True)
+        st.plotly_chart(fig4, use_container_width=True)
     else:
         st.info("Outcome column not detected.")
 
 # =========================================================
-# 4. Top PT Frequency
+# 5. Top PT Frequency
 # =========================================================
 pt_counts = (
     filtered_df[pt_col]
@@ -303,23 +345,25 @@ pt_counts = (
 pt_counts.columns = ["Event PT", "Case Count"]
 
 # =========================================================
-# 5. SOC Distribution
+# 6. SOC Distribution
 # =========================================================
 c5, c6 = st.columns(2)
 
+soc_counts = pd.DataFrame()
+
 with c5:
-    st.subheader("4. Top PT Frequency")
-    fig4 = px.bar(
+    st.subheader("Top PT Frequency")
+    fig5 = px.bar(
         pt_counts.sort_values("Case Count", ascending=True),
         x="Case Count",
         y="Event PT",
         orientation="h",
         title="Top PTs"
     )
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig5, use_container_width=True)
 
 with c6:
-    st.subheader("5. SOC Distribution")
+    st.subheader("SOC Distribution")
     if soc_col:
         soc_counts = (
             filtered_df[soc_col]
@@ -329,20 +373,20 @@ with c6:
         )
         soc_counts.columns = ["SOC", "Count"]
 
-        fig5 = px.treemap(
+        fig6 = px.treemap(
             soc_counts,
             path=["SOC"],
             values="Count",
             title="SOC Distribution"
         )
-        st.plotly_chart(fig5, use_container_width=True)
+        st.plotly_chart(fig6, use_container_width=True)
     else:
         st.info("SOC column not detected.")
 
 # =========================================================
-# 6. PT Trend Over Time
+# 7. PT Trend Over Time
 # =========================================================
-st.subheader("6. PT Trend Over Time")
+st.subheader("PT Trend Over Time")
 
 pt_options = sorted(filtered_df[pt_col].dropna().astype(str).unique().tolist())
 selected_pt = st.selectbox("Select PT for trend view", pt_options)
@@ -354,19 +398,19 @@ selected_pt_trend = (
     .reset_index(name="Case Count")
 )
 
-fig6 = px.line(
+fig7 = px.line(
     selected_pt_trend,
     x="Month",
     y="Case Count",
     markers=True,
     title=f"Monthly Trend for {selected_pt}"
 )
-st.plotly_chart(fig6, use_container_width=True)
+st.plotly_chart(fig7, use_container_width=True)
 
 # =========================================================
-# 7. Spike Detection Table
+# 8. Spike Detection Table
 # =========================================================
-st.subheader("7. Spike Detection Table")
+st.subheader("Spike Detection Table")
 
 monthly_pt_counts = (
     filtered_df.groupby(["Month", pt_col])
@@ -408,11 +452,124 @@ else:
     st.info("At least 2 months of data are needed for spike detection.")
 
 # =========================================================
-# 8. Demographics (Age / Gender)
+# 9. Signal Radar / Priority Board
 # =========================================================
-st.subheader("8. Demographics")
+st.subheader("Signal Radar / Priority Board")
+
+priority_table = None
+
+if pivot.shape[1] >= 2:
+    current_month_name = pivot.columns[-1]
+    previous_month_name = pivot.columns[-2]
+
+    radar_base = pivot.copy()
+    radar_base["Previous Month"] = radar_base[previous_month_name]
+    radar_base["Current Month"] = radar_base[current_month_name]
+    radar_base["Absolute Increase"] = radar_base["Current Month"] - radar_base["Previous Month"]
+
+    radar_base = radar_base.reset_index()
+    radar_base = radar_base.rename(columns={pt_col: "Event PT"})
+
+    if ser_col:
+        serious_pt = (
+            filtered_df[filtered_df[ser_col] == "Yes"]
+            .groupby(pt_col)
+            .size()
+            .reset_index(name="Serious Cases")
+        )
+        radar_base = radar_base.merge(serious_pt, left_on="Event PT", right_on=pt_col, how="left")
+        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+    else:
+        radar_base["Serious Cases"] = 0
+
+    if fat_col:
+        fatal_pt = (
+            filtered_df[filtered_df[fat_col] == "Yes"]
+            .groupby(pt_col)
+            .size()
+            .reset_index(name="Fatal Cases")
+        )
+        radar_base = radar_base.merge(fatal_pt, left_on="Event PT", right_on=pt_col, how="left")
+        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+    else:
+        radar_base["Fatal Cases"] = 0
+
+    if listed_col:
+        unlisted_pt = (
+            filtered_df[filtered_df[listed_col].astype(str).str.lower().isin(["unlisted", "unexpected"])]
+            .groupby(pt_col)
+            .size()
+            .reset_index(name="Unlisted Cases")
+        )
+        radar_base = radar_base.merge(unlisted_pt, left_on="Event PT", right_on=pt_col, how="left")
+        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+    else:
+        radar_base["Unlisted Cases"] = 0
+
+    radar_base["Serious Cases"] = radar_base["Serious Cases"].fillna(0)
+    radar_base["Fatal Cases"] = radar_base["Fatal Cases"].fillna(0)
+    radar_base["Unlisted Cases"] = radar_base["Unlisted Cases"].fillna(0)
+
+    radar_base["New PT This Month"] = np.where(
+        (radar_base["Previous Month"] == 0) & (radar_base["Current Month"] > 0),
+        1,
+        0
+    )
+
+    radar_base["Priority Score"] = (
+        (radar_base["Absolute Increase"].clip(lower=0) * 2) +
+        (radar_base["Serious Cases"] * 3) +
+        (radar_base["Fatal Cases"] * 8) +
+        (radar_base["Unlisted Cases"] * 2) +
+        (radar_base["New PT This Month"] * 5)
+    )
+
+    def signal_flag(score):
+        if score >= 15:
+            return "High"
+        elif score >= 8:
+            return "Medium"
+        return "Low"
+
+    radar_base["Signal Flag"] = radar_base["Priority Score"].apply(signal_flag)
+
+    priority_table = radar_base[
+        [
+            "Event PT",
+            "Previous Month",
+            "Current Month",
+            "Absolute Increase",
+            "Serious Cases",
+            "Fatal Cases",
+            "Unlisted Cases",
+            "New PT This Month",
+            "Priority Score",
+            "Signal Flag",
+        ]
+    ].sort_values(["Priority Score", "Absolute Increase"], ascending=False)
+
+    st.dataframe(priority_table.head(25), use_container_width=True)
+
+    fig8 = px.bar(
+        priority_table.head(15),
+        x="Event PT",
+        y="Priority Score",
+        color="Signal Flag",
+        title="Top Signal Priorities"
+    )
+    st.plotly_chart(fig8, use_container_width=True)
+else:
+    st.info("At least 2 months of data are needed for the Signal Radar / Priority Board.")
+
+# =========================================================
+# 10. Demographics
+# =========================================================
+st.subheader("Demographics")
 
 d1, d2 = st.columns(2)
+
+age_counts = pd.DataFrame()
+gender_counts = pd.DataFrame()
 
 with d1:
     if age_col:
@@ -435,13 +592,13 @@ with d1:
         age_counts["Age Group"] = pd.Categorical(age_counts["Age Group"], categories=age_order, ordered=True)
         age_counts = age_counts.sort_values("Age Group")
 
-        fig8a = px.bar(
+        fig9 = px.bar(
             age_counts,
             x="Age Group",
             y="Count",
             title="Age Group Distribution"
         )
-        st.plotly_chart(fig8a, use_container_width=True)
+        st.plotly_chart(fig9, use_container_width=True)
     else:
         st.info("Age column not detected.")
 
@@ -455,13 +612,13 @@ with d2:
         )
         gender_counts.columns = ["Gender", "Count"]
 
-        fig8b = px.pie(
+        fig10 = px.pie(
             gender_counts,
             names="Gender",
             values="Count",
             title="Gender Distribution"
         )
-        st.plotly_chart(fig8b, use_container_width=True)
+        st.plotly_chart(fig10, use_container_width=True)
     else:
         st.info("Gender column not detected.")
 
@@ -484,31 +641,139 @@ if fat_col:
         st.info("No fatal cases in filtered dataset.")
 
 # =========================================================
-# Download
+# Downloads
 # =========================================================
-st.subheader("Download Trend Tables")
+st.subheader("Download Reports")
 
+# CSV
 download_df = monthly_pt_counts.copy()
 csv = download_df.to_csv(index=False).encode("utf-8")
 
 st.download_button(
-    "Download Monthly PT Trend Table",
+    "Download Monthly PT Trend Table (CSV)",
     data=csv,
     file_name="monthly_pt_trend_table.csv",
     mime="text/csv",
 )
 
+# Excel
 output = io.BytesIO()
 with pd.ExcelWriter(output, engine="openpyxl") as writer:
     filtered_df.to_excel(writer, index=False, sheet_name="Filtered Raw Data")
+    monthly_cases.to_excel(writer, index=False, sheet_name="Monthly Case Volume")
     monthly_pt_counts.to_excel(writer, index=False, sheet_name="Monthly PT Trends")
     pt_counts.to_excel(writer, index=False, sheet_name="Top PT Frequency")
+    if country_counts is not None and not country_counts.empty:
+        country_counts.to_excel(writer, index=False, sheet_name="Country Distribution")
+    if outcome_counts is not None and not outcome_counts.empty:
+        outcome_counts.to_excel(writer, index=False, sheet_name="Outcome Distribution")
+    if soc_counts is not None and not soc_counts.empty:
+        soc_counts.to_excel(writer, index=False, sheet_name="SOC Distribution")
+    if age_counts is not None and not age_counts.empty:
+        age_counts.to_excel(writer, index=False, sheet_name="Age Distribution")
+    if gender_counts is not None and not gender_counts.empty:
+        gender_counts.to_excel(writer, index=False, sheet_name="Gender Distribution")
     if spike_table is not None:
         spike_table.to_excel(writer, index=False, sheet_name="Spike Detection")
+    if priority_table is not None:
+        priority_table.to_excel(writer, index=False, sheet_name="Signal Priority Board")
 
 st.download_button(
     "Download Full Excel Report",
     data=output.getvalue(),
     file_name="Signal_Trending_Report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+# PDF
+pdf_buffer = io.BytesIO()
+pdf = canvas.Canvas(pdf_buffer, pagesize=A4)
+width, height = A4
+y = height - 40
+
+def write_line(text, font="Helvetica", size=10, gap=14):
+    global y
+    pdf.setFont(font, size)
+    pdf.drawString(40, y, str(text)[:110])
+    y -= gap
+
+def write_wrapped(text, font="Helvetica", size=10, width_chars=100, gap=14):
+    global y
+    pdf.setFont(font, size)
+    for line in wrap_text(text, width=width_chars):
+        if y < 60:
+            pdf.showPage()
+            y = height - 40
+            pdf.setFont(font, size)
+        pdf.drawString(40, y, line)
+        y -= gap
+
+write_line("Signal Trending Analytics Report", "Helvetica-Bold", 16, 20)
+write_line("")
+write_line(f"Rows: {len(filtered_df)}")
+write_line(f"Unique PTs: {filtered_df[pt_col].nunique()}")
+if prod_col:
+    write_line(f"Selected Product: {selected_product}")
+if country_col:
+    write_line(f"Selected Country: {selected_country}")
+if soc_col:
+    write_line(f"Selected SOC: {selected_soc}")
+write_line(f"Months Included: {', '.join(selected_months[:8])}" + (" ..." if len(selected_months) > 8 else ""))
+write_line("")
+
+write_line("Top PT Frequency", "Helvetica-Bold", 12, 16)
+for _, row in pt_counts.head(10).iterrows():
+    write_line(f"{row['Event PT']}: {row['Case Count']}")
+
+write_line("")
+write_line("Country Distribution", "Helvetica-Bold", 12, 16)
+if country_counts is not None and not country_counts.empty:
+    for _, row in country_counts.head(10).iterrows():
+        write_line(f"{row['Country']}: {row['Case Count']}")
+else:
+    write_line("Not available")
+
+write_line("")
+write_line("Outcome Distribution", "Helvetica-Bold", 12, 16)
+if outcome_counts is not None and not outcome_counts.empty:
+    for _, row in outcome_counts.head(10).iterrows():
+        write_line(f"{row['Outcome']}: {row['Count']}")
+else:
+    write_line("Not available")
+
+write_line("")
+write_line("Spike Detection", "Helvetica-Bold", 12, 16)
+if spike_table is not None:
+    for _, row in spike_table.head(10).iterrows():
+        write_line(
+            f"{row['Event PT']}: Prev={row['Previous Month']}, Curr={row['Current Month']}, "
+            f"AbsInc={row['Absolute Increase']}"
+        )
+else:
+    write_line("Not enough months to calculate spikes")
+
+write_line("")
+write_line("Signal Priority Board", "Helvetica-Bold", 12, 16)
+if priority_table is not None:
+    for _, row in priority_table.head(10).iterrows():
+        write_line(
+            f"{row['Event PT']}: Score={row['Priority Score']}, Flag={row['Signal Flag']}"
+        )
+else:
+    write_line("Not enough months to calculate priority scores")
+
+write_line("")
+write_line("Selected PT Trend", "Helvetica-Bold", 12, 16)
+write_line(f"Selected PT: {selected_pt}")
+for _, row in selected_pt_trend.iterrows():
+    write_line(f"{row['Month']}: {row['Case Count']}")
+
+pdf.save()
+pdf_buffer.seek(0)
+
+st.download_button(
+    "Download PDF Report",
+    data=pdf_buffer.getvalue(),
+    file_name="Signal_Trending_Report.pdf",
+    mime="application/pdf",
 )
