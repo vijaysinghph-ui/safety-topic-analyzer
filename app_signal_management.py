@@ -60,27 +60,14 @@ def wrap_text(text, width=100):
         if len(current) + len(word) + 1 <= width:
             current = f"{current} {word}".strip()
         else:
-            lines.append(current)
+            if current:
+                lines.append(current)
             current = word
 
     if current:
         lines.append(current)
 
     return lines
-
-
-def safe_top_counts(df, col_name, label_name="Label", count_name="Count", top_n=10):
-    if col_name:
-        temp = (
-            df[col_name]
-            .astype(str)
-            .value_counts()
-            .head(top_n)
-            .reset_index()
-        )
-        temp.columns = [label_name, count_name]
-        return temp
-    return pd.DataFrame(columns=[label_name, count_name])
 
 
 # =========================================================
@@ -164,7 +151,6 @@ if ser_col:
 if fat_col:
     df[fat_col] = normalize_yes_no(df[fat_col])
 
-# Age buckets
 if age_col:
     df[age_col] = pd.to_numeric(df[age_col], errors="coerce")
 
@@ -226,7 +212,7 @@ if filtered_df.empty:
 top_n = st.sidebar.slider("Top PTs to display", 5, 25, 10, 10)
 
 # =========================================================
-# KPIs
+# Overview
 # =========================================================
 st.subheader("Overview")
 k1, k2, k3, k4 = st.columns(4)
@@ -245,14 +231,13 @@ monthly_cases = filtered_df.groupby("Month").size().reset_index(name="Case Count
 # =========================================================
 # 2. Serious vs Non-serious Trend
 # =========================================================
+serious_trend = None
 if ser_col:
     serious_trend = (
         filtered_df.groupby(["Month", ser_col])
         .size()
         .reset_index(name="Case Count")
     )
-else:
-    serious_trend = None
 
 c1, c2 = st.columns(2)
 
@@ -462,13 +447,12 @@ if pivot.shape[1] >= 2:
     current_month_name = pivot.columns[-1]
     previous_month_name = pivot.columns[-2]
 
-    radar_base = pivot.copy()
+    radar_base = pivot.copy().reset_index()
+    radar_base = radar_base.rename(columns={pt_col: "Event PT"})
+
     radar_base["Previous Month"] = radar_base[previous_month_name]
     radar_base["Current Month"] = radar_base[current_month_name]
     radar_base["Absolute Increase"] = radar_base["Current Month"] - radar_base["Previous Month"]
-
-    radar_base = radar_base.reset_index()
-    radar_base = radar_base.rename(columns={pt_col: "Event PT"})
 
     if ser_col:
         serious_pt = (
@@ -476,9 +460,9 @@ if pivot.shape[1] >= 2:
             .groupby(pt_col)
             .size()
             .reset_index(name="Serious Cases")
+            .rename(columns={pt_col: "Event PT"})
         )
-        radar_base = radar_base.merge(serious_pt, left_on="Event PT", right_on=pt_col, how="left")
-        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+        radar_base = radar_base.merge(serious_pt, on="Event PT", how="left")
     else:
         radar_base["Serious Cases"] = 0
 
@@ -488,9 +472,9 @@ if pivot.shape[1] >= 2:
             .groupby(pt_col)
             .size()
             .reset_index(name="Fatal Cases")
+            .rename(columns={pt_col: "Event PT"})
         )
-        radar_base = radar_base.merge(fatal_pt, left_on="Event PT", right_on=pt_col, how="left")
-        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+        radar_base = radar_base.merge(fatal_pt, on="Event PT", how="left")
     else:
         radar_base["Fatal Cases"] = 0
 
@@ -500,9 +484,9 @@ if pivot.shape[1] >= 2:
             .groupby(pt_col)
             .size()
             .reset_index(name="Unlisted Cases")
+            .rename(columns={pt_col: "Event PT"})
         )
-        radar_base = radar_base.merge(unlisted_pt, left_on="Event PT", right_on=pt_col, how="left")
-        radar_base.drop(columns=[pt_col], inplace=True, errors="ignore")
+        radar_base = radar_base.merge(unlisted_pt, on="Event PT", how="left")
     else:
         radar_base["Unlisted Cases"] = 0
 
@@ -517,11 +501,11 @@ if pivot.shape[1] >= 2:
     )
 
     radar_base["Priority Score"] = (
-        (radar_base["Absolute Increase"].clip(lower=0) * 2) +
-        (radar_base["Serious Cases"] * 3) +
-        (radar_base["Fatal Cases"] * 8) +
-        (radar_base["Unlisted Cases"] * 2) +
-        (radar_base["New PT This Month"] * 5)
+        (radar_base["Absolute Increase"].clip(lower=0) * 2)
+        + (radar_base["Serious Cases"] * 3)
+        + (radar_base["Fatal Cases"] * 8)
+        + (radar_base["Unlisted Cases"] * 2)
+        + (radar_base["New PT This Month"] * 5)
     )
 
     def signal_flag(score):
@@ -689,24 +673,22 @@ st.download_button(
 pdf_buffer = io.BytesIO()
 pdf = canvas.Canvas(pdf_buffer, pagesize=A4)
 width, height = A4
-y = height - 40
+state = {"y": height - 40}
 
 def write_line(text, font="Helvetica", size=10, gap=14):
-    global y
     pdf.setFont(font, size)
-    pdf.drawString(40, y, str(text)[:110])
-    y -= gap
+    pdf.drawString(40, state["y"], str(text)[:110])
+    state["y"] -= gap
 
 def write_wrapped(text, font="Helvetica", size=10, width_chars=100, gap=14):
-    global y
     pdf.setFont(font, size)
     for line in wrap_text(text, width=width_chars):
-        if y < 60:
+        if state["y"] < 60:
             pdf.showPage()
-            y = height - 40
+            state["y"] = height - 40
             pdf.setFont(font, size)
-        pdf.drawString(40, y, line)
-        y -= gap
+        pdf.drawString(40, state["y"], line)
+        state["y"] -= gap
 
 write_line("Signal Trending Analytics Report", "Helvetica-Bold", 16, 20)
 write_line("")
@@ -718,7 +700,9 @@ if country_col:
     write_line(f"Selected Country: {selected_country}")
 if soc_col:
     write_line(f"Selected SOC: {selected_soc}")
-write_line(f"Months Included: {', '.join(selected_months[:8])}" + (" ..." if len(selected_months) > 8 else ""))
+write_wrapped(
+    f"Months Included: {', '.join(selected_months[:8])}" + (" ..." if len(selected_months) > 8 else "")
+)
 write_line("")
 
 write_line("Top PT Frequency", "Helvetica-Bold", 12, 16)
@@ -745,7 +729,7 @@ write_line("")
 write_line("Spike Detection", "Helvetica-Bold", 12, 16)
 if spike_table is not None:
     for _, row in spike_table.head(10).iterrows():
-        write_line(
+        write_wrapped(
             f"{row['Event PT']}: Prev={row['Previous Month']}, Curr={row['Current Month']}, "
             f"AbsInc={row['Absolute Increase']}"
         )
@@ -756,7 +740,7 @@ write_line("")
 write_line("Signal Priority Board", "Helvetica-Bold", 12, 16)
 if priority_table is not None:
     for _, row in priority_table.head(10).iterrows():
-        write_line(
+        write_wrapped(
             f"{row['Event PT']}: Score={row['Priority Score']}, Flag={row['Signal Flag']}"
         )
 else:
