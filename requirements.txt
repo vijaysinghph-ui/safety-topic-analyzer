@@ -1,9 +1,11 @@
 
-streamlit
-pandas
-openai
+streamlit>=1.30
+pandas>=2.0
 openpyxl
 python-docx
+openai
+plotly>=5.20
+numpy
 
 
 
