@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -243,7 +244,6 @@ with c2:
 
 # =========================================================
 # 3. Country Distribution
-# =========================================================
 # 9. Outcome Distribution
 # =========================================================
 c3, c4 = st.columns(2)
@@ -381,6 +381,8 @@ pivot = monthly_pt_counts.pivot_table(
     fill_value=0
 )
 
+spike_table = None
+
 if pivot.shape[1] >= 2:
     prev_col = pivot.columns[-2]
     curr_col = pivot.columns[-1]
@@ -464,7 +466,7 @@ with d2:
         st.info("Gender column not detected.")
 
 # =========================================================
-# Fatal trend bonus (if available)
+# Fatal trend bonus
 # =========================================================
 if fat_col:
     st.subheader("Fatal Case Trend")
@@ -494,4 +496,19 @@ st.download_button(
     data=csv,
     file_name="monthly_pt_trend_table.csv",
     mime="text/csv",
+)
+
+output = io.BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    filtered_df.to_excel(writer, index=False, sheet_name="Filtered Raw Data")
+    monthly_pt_counts.to_excel(writer, index=False, sheet_name="Monthly PT Trends")
+    pt_counts.to_excel(writer, index=False, sheet_name="Top PT Frequency")
+    if spike_table is not None:
+        spike_table.to_excel(writer, index=False, sheet_name="Spike Detection")
+
+st.download_button(
+    "Download Full Excel Report",
+    data=output.getvalue(),
+    file_name="Signal_Trending_Report.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
